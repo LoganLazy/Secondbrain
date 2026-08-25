@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -17,6 +17,16 @@ from . import config, db, ingest, rag
 from . import cards as cards_mod
 
 app = FastAPI(title="Memory AI")
+
+
+def KB(request) -> str:
+    """从请求头解析知识库ID, 非法则回退默认库"""
+    kb = request.headers.get("x-kb-id", "default")
+    if kb != "default":
+        row = db.get().execute("SELECT id FROM kbs WHERE id=?", (kb,)).fetchone()
+        if not row:
+            return "default"
+    return kb
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
@@ -36,7 +46,7 @@ class MemoryIn(BaseModel):
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)):
+async def upload(request: Request, files: list[UploadFile] = File(...)):
     """支持多文件上传, 返回每个文件的结果"""
     results = []
     for file in files:
@@ -50,7 +60,8 @@ async def upload(files: list[UploadFile] = File(...)):
         with open(dest, "wb") as out:
             shutil.copyfileobj(file.file, out)
         try:
-            info = ingest.ingest(dest, display_name=file.filename, keep_path=dest)
+            info = ingest.ingest(dest, display_name=file.filename,
+                                 keep_path=dest, kb_id=KB(request))
             results.append({"file": file.filename, "ok": True,
                             "title": info["title"], "id": info["id"]})
         except ValueError as e:
@@ -100,11 +111,11 @@ def assist(a: AssistIn):
 
 
 @app.get("/api/docs")
-def list_docs():
+def list_docs(request: Request):
     rows = db.get().execute(
         "SELECT id,filename,title,category,tags,summary,chunks,created,"
         "(file_path IS NOT NULL AND file_path!='') AS has_file"
-        " FROM docs ORDER BY id DESC"
+        " FROM docs WHERE kb_id=? ORDER BY id DESC", (KB(request),)
     ).fetchall()
     return [
         {**dict(r), "tags": json.loads(r["tags"])} for r in rows
@@ -121,8 +132,8 @@ def delete_doc(doc_id: int):
 
 
 @app.post("/api/search")
-def search(q: SearchQ):
-    hits = ingest.search(q.query, q.k)
+def search(request: Request, q: SearchQ):
+    hits = ingest.search(q.query, q.k, kb_id=KB(request))
     return [
         {"title": h["title"], "filename": h["filename"], "page": h["page"],
          "text": h["text"], "score": round(h["score"], 3)}
@@ -131,8 +142,8 @@ def search(q: SearchQ):
 
 
 @app.post("/api/chat")
-def chat(qa: QA):
-    result = rag.chat(qa.question)
+def chat(request: Request, qa: QA):
+    result = rag.chat(qa.question, kb_id=KB(request))
     # 后台自动提取长期记忆, 不阻塞回答
     threading.Thread(
         target=auto_memory, args=(qa.question, result.get("answer", "")),
@@ -142,11 +153,13 @@ def chat(qa: QA):
 
 
 @app.post("/api/chat/stream")
-def chat_stream(qa: QA):
+def chat_stream(request: Request, qa: QA):
     from fastapi.responses import StreamingResponse
 
+    kb = KB(request)
+
     def gen():
-        for ev in rag.chat_stream(qa.question):
+        for ev in rag.chat_stream(qa.question, kb_id=kb):
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",
@@ -155,11 +168,13 @@ def chat_stream(qa: QA):
 
 
 @app.get("/api/review/today")
-def review_today():
+def review_today(request: Request):
     """每日回顾: 到期闪卡 + 随机推荐重读的文档"""
-    due = cards_mod.due_queue()
+    kb = KB(request)
+    due = cards_mod.due_queue(kb)
     rows = db.get().execute(
-        "SELECT id,title,summary FROM docs ORDER BY RANDOM() LIMIT 2"
+        "SELECT id,title,summary FROM docs WHERE kb_id=? ORDER BY RANDOM() LIMIT 2",
+        (kb,),
     ).fetchall()
     picks = [dict(r) for r in rows]
     return {"due_cards": len(due), "picks": picks}
@@ -204,10 +219,11 @@ def auto_memory(question: str, answer: str):
 
 
 @app.get("/api/history")
-def history(limit: int = 50):
+def history(request: Request, limit: int = 50):
     rows = db.get().execute(
-        "SELECT role,content,sources,created FROM chats ORDER BY id DESC LIMIT ?",
-        (limit,),
+        "SELECT role,content,sources,created FROM chats WHERE kb_id=?"
+        " ORDER BY id DESC LIMIT ?",
+        (KB(request), limit),
     ).fetchall()
     return [{**dict(r), "sources": json.loads(r["sources"])} for r in rows][::-1]
 
@@ -236,9 +252,12 @@ def del_memory(mid: int):
 
 
 @app.get("/api/stats")
-def stats():
-    docs = db.get().execute("SELECT COUNT(*) c FROM docs").fetchone()["c"]
-    chunks = ingest._col.count()
+def stats(request: Request):
+    kb = KB(request)
+    docs = db.get().execute(
+        "SELECT COUNT(*) c FROM docs WHERE kb_id=?", (kb,)
+    ).fetchone()["c"]
+    chunks = len(ingest._col.get(where={"kb_id": kb})["ids"])
     return {"docs": docs, "chunks": chunks}
 
 
@@ -301,6 +320,47 @@ def test_config(c: ConfigIn):
         raise
     except Exception as e:
         return {"code": 1, "msg": f"连接失败: {e}"}
+
+
+# ---------------- 多知识库 ----------------
+
+@app.get("/api/kbs")
+def list_kbs():
+    return [dict(r) for r in db.get().execute(
+        "SELECT * FROM kbs ORDER BY created")]
+
+
+@app.post("/api/kbs")
+def create_kb(body: dict):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "名称不能为空")
+    import random
+    kid = "kb_" + "".join(random.choices("0123456789abcdef", k=6))
+    while db.get().execute("SELECT 1 FROM kbs WHERE id=?", (kid,)).fetchone():
+        kid = "kb_" + "".join(random.choices("0123456789abcdef", k=6))
+    db.get().execute("INSERT INTO kbs(id,name,created) VALUES(?,?,?)",
+                     (kid, name, db.now()))
+    db.get().commit()
+    return {"code": 0, "id": kid, "name": name}
+
+
+@app.delete("/api/kbs/{kb_id}")
+def delete_kb(kb_id: str):
+    if kb_id == "default":
+        raise HTTPException(400, "默认知识库不能删除")
+    # 删文档(含向量/关键词索引/原文件)
+    for row in db.get().execute(
+            "SELECT id FROM docs WHERE kb_id=?", (kb_id,)).fetchall():
+        try:
+            ingest.delete_doc(row["id"])
+        except Exception:
+            pass
+    db.get().execute("DELETE FROM flashcards WHERE kb_id=?", (kb_id,))
+    db.get().execute("DELETE FROM chats WHERE kb_id=?", (kb_id,))
+    db.get().execute("DELETE FROM kbs WHERE id=?", (kb_id,))
+    db.get().commit()
+    return {"code": 0}
 
 
 # ---------------- 知识库文件夹自动导入 ----------------
@@ -369,13 +429,13 @@ def fc_generate(q: GenIn):
 
 
 @app.get("/api/flashcards")
-def fc_list(doc_id: int | None = None):
-    return cards_mod.list_cards(doc_id)
+def fc_list(request: Request, doc_id: int | None = None):
+    return cards_mod.list_cards(doc_id, kb_id=KB(request))
 
 
 @app.get("/api/flashcards/due")
-def fc_due():
-    return cards_mod.due_queue()
+def fc_due(request: Request):
+    return cards_mod.due_queue(KB(request))
 
 
 class AnswerIn(BaseModel):
@@ -400,8 +460,8 @@ def fc_delete(card_id: int):
 
 
 @app.get("/api/flashcards/stats")
-def fc_stats():
-    return cards_mod.stats()
+def fc_stats(request: Request):
+    return cards_mod.stats(KB(request))
 
 
 # 生产模式挂载前端构建产物(存在才生效)

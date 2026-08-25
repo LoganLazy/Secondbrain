@@ -22,16 +22,16 @@ def build_context(hits: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def chat_stream(question: str):
+def chat_stream(question: str, kb_id: str = "default"):
     """流式RAG问答生成器: 先发sources事件, 再逐段delta, 最后done"""
-    hits = search_with_threshold(question)
+    hits = search_with_threshold(question, kb_id)
 
     if not hits:
         yield {"type": "sources", "sources": []}
         text = "你的知识库里还没有找到相关内容，先上传一些资料吧。"
         yield {"type": "delta", "text": text}
-        save_chat("user", question)
-        save_chat("assistant", text)
+        save_chat("user", question, kb_id=kb_id)
+        save_chat("assistant", text, kb_id=kb_id)
         yield {"type": "done"}
         return
 
@@ -44,7 +44,7 @@ def chat_stream(question: str):
     history = [
         {"role": r["role"], "content": r["content"]}
         for r in db.get().execute(
-            "SELECT role,content FROM chats ORDER BY id DESC LIMIT 6")
+            "SELECT role,content FROM chats WHERE kb_id=? ORDER BY id DESC LIMIT 6")
     ][::-1]
     memories = [r["content"] for r in db.get().execute(
         "SELECT content FROM memories ORDER BY id DESC LIMIT 20")]
@@ -67,23 +67,23 @@ def chat_stream(question: str):
         yield {"type": "delta", "text": piece}
 
     answer = "".join(full).strip() or "(AI未能给出有效回答，请重试)"
-    save_chat("user", question)
+    save_chat("user", question, kb_id=kb_id)
     save_chat("assistant", answer,
               [{"title": h["title"], "filename": h["filename"],
-                "page": h["page"]} for h in hits])
+                "page": h["page"]} for h in hits], kb_id=kb_id)
     yield {"type": "done"}
 
 
-def search_with_threshold(question: str):
-    hits = ingest.search(question)
+def search_with_threshold(question: str, kb_id: str = "default"):
+    hits = ingest.search(question, kb_id=kb_id)
     if hits:
         best = max(h["score"] for h in hits)
         hits = [h for h in hits if h["score"] >= best * 0.55 and h["score"] > 0.05]
     return hits
 
 
-def chat(question: str) -> dict:
-    hits = search_with_threshold(question)
+def chat(question: str, kb_id: str = "default") -> dict:
+    hits = search_with_threshold(question, kb_id)
     if not hits:
         answer = "你的知识库里还没有任何资料，先上传一些文档吧。"
         return {"answer": answer, "sources": []}
@@ -92,7 +92,7 @@ def chat(question: str) -> dict:
     history = [
         {"role": r["role"], "content": r["content"]}
         for r in db.get().execute(
-            "SELECT role,content FROM chats ORDER BY id DESC LIMIT 6"
+            "SELECT role,content FROM chats WHERE kb_id=? ORDER BY id DESC LIMIT 6"
         )
     ][::-1]
     memories = [r["content"] for r in db.get().execute(
@@ -117,9 +117,11 @@ def chat(question: str) -> dict:
     return {"answer": answer, "sources": sources}
 
 
-def save_chat(role: str, content: str, sources: list | None = None):
+def save_chat(role: str, content: str, sources: list | None = None,
+              kb_id: str = "default"):
     db.get().execute(
-        "INSERT INTO chats(role,content,sources,created) VALUES(?,?,?,?)",
-        (role, content, json.dumps(sources or [], ensure_ascii=False), db.now()),
+        "INSERT INTO chats(role,content,sources,created,kb_id) VALUES(?,?,?,?,?)",
+        (role, content, json.dumps(sources or [], ensure_ascii=False),
+         db.now(), kb_id),
     )
     db.get().commit()

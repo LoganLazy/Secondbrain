@@ -54,6 +54,8 @@ def generate(doc_id: int, num: int = 10) -> int:
     cards = json.loads(s)
     ensure_table()
     now = db.now()
+    kb = db.get().execute("SELECT kb_id FROM docs WHERE id=?", (doc_id,)).fetchone()
+    kb_id = kb["kb_id"] if kb else "default"
     n = 0
     exist_qs = {r[0].lower() for r in db.get().execute(
         "SELECT q FROM flashcards WHERE doc_id=?", (doc_id,))}
@@ -64,26 +66,32 @@ def generate(doc_id: int, num: int = 10) -> int:
                 continue
             exist_qs.add(q.lower())
             db.get().execute(
-                "INSERT INTO flashcards(doc_id,q,a,created) VALUES(?,?,?,?)",
-                (doc_id, q, str(c["a"]).strip(), now),
+                "INSERT INTO flashcards(doc_id,q,a,created,kb_id) VALUES(?,?,?,?,?)",
+                (doc_id, q, str(c["a"]).strip(), now, kb_id),
             )
             n += 1
     db.get().commit()
     return n
 
 
-def list_cards(doc_id: int | None = None):
+def list_cards(doc_id: int | None = None, kb_id: str | None = None):
     ensure_table()
-    sql = ("SELECT * FROM flashcards" +
-           (" WHERE doc_id=?" if doc_id else "") +
-           " ORDER BY id DESC")
-    cur = db.get().execute(sql, (doc_id,) if doc_id else ())
+    conds, args = [], []
+    if doc_id:
+        conds.append("doc_id=?"); args.append(doc_id)
+    if kb_id:
+        conds.append("kb_id=?"); args.append(kb_id)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    cur = db.get().execute("SELECT * FROM flashcards" + where + " ORDER BY id DESC", args)
     return [dict(r) for r in cur]
 
 
-def due_queue():
+def due_queue(kb_id: str | None = None):
     ensure_table()
-    rows = db.get().execute("SELECT * FROM flashcards ORDER BY id").fetchall()
+    rows = db.get().execute(
+        "SELECT * FROM flashcards" + (" WHERE kb_id=?" if kb_id else "") +
+        " ORDER BY id", (kb_id,) if kb_id else ()
+    ).fetchall()
     now = db.now()
     due = [dict(r) for r in rows if now >= _due_after(r)]
     # 新卡优先, 其次快到期的
@@ -118,9 +126,12 @@ def delete(card_id: int):
     db.get().commit()
 
 
-def stats() -> dict:
+def stats(kb_id: str | None = None) -> dict:
     ensure_table()
-    rows = db.get().execute("SELECT * FROM flashcards").fetchall()
+    rows = db.get().execute(
+        "SELECT * FROM flashcards" + (" WHERE kb_id=?" if kb_id else ""),
+        (kb_id,) if kb_id else ()
+    ).fetchall()
     total = len(rows)
     due = len([r for r in rows if db.now() >= _due_after(r)])
     mastered = len([r for r in rows if r["box"] >= MASTER_BOX])

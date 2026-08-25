@@ -14,6 +14,9 @@ async function jfetch(url, opts = {}) {
 }
 
 export const api = {
+  kbs: () => jfetch("/api/kbs"),
+  createKb: (name) => jfetch("/api/kbs", { method: "POST", body: JSON.stringify({ name }) }),
+  delKb: (id) => jfetch(`/api/kbs/${id}`, { method: "DELETE" }),
   stats: () => jfetch("/api/stats"),
   docs: () => jfetch("/api/docs"),
   delDoc: (id) => jfetch(`/api/docs/${id}`, { method: "DELETE" }),

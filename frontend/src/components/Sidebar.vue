@@ -1,5 +1,13 @@
 <template>
   <aside class="sidebar">
+    <div class="kb-switch">
+      <select :value="kb" @change="onKbChange($event.target.value)" title="切换知识库">
+        <option v-for="k in kbs" :key="k.id" :value="k.id">📚 {{ k.name }}</option>
+      </select>
+      <button class="kb-add" title="新建知识库" @click="createKb">＋</button>
+      <button v-if="kb !== 'default'" class="kb-del" title="删除当前知识库" @click="delCurrent">🗑</button>
+    </div>
+
     <div class="logo">
       <span class="logo-icon">🧠</span>
       <div>
@@ -32,9 +40,38 @@ import { api } from "../api"
 defineProps({ tab: String })
 defineEmits(["change"])
 const stats = ref({ docs: 0, chunks: 0 })
+const kbs = ref([])
+const kb = localStorage.getItem("kb") || "default"
+
+async function loadKbs() {
+  try {
+    kbs.value = await api.kbs()
+    if (!kbs.value.some((k) => k.id === kb)) {
+      localStorage.setItem("kb", "default")
+    }
+  } catch (e) {}
+}
+function onKbChange(v) {
+  localStorage.setItem("kb", v)
+  location.reload()
+}
+async function createKb() {
+  const name = prompt("新知识库名称：")
+  if (!name?.trim()) return
+  const r = await api.createKb(name.trim())
+  localStorage.setItem("kb", r.id)
+  location.reload()
+}
+async function delCurrent() {
+  if (!confirm(`删除「${kbs.value.find((k) => k.id === kb)?.name}」及其全部文档/卡片/记录？不可恢复！`)) return
+  await api.delKb(kb)
+  localStorage.setItem("kb", "default")
+  location.reload()
+}
 
 onMounted(() => {
   load()
+  loadKbs()
   window.addEventListener("kb-updated", load)
 })
 async function load() {

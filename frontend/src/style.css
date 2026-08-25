@@ -53,3 +53,23 @@ button {
   font-size: 13.5px;
 }
 .rb-btn:hover { border-color: var(--accent); }
+
+.kb-switch { display: flex; gap: 6px; margin-bottom: 12px; align-items: center; }
+.kb-switch select {
+  flex: 1;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+  font-size: 13.5px;
+  outline: none;
+  min-width: 0;
+}
+.kb-add, .kb-del {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  width: 32px; height: 34px; cursor: pointer; flex-shrink: 0;
+}
+.kb-add:hover { border-color: var(--accent); }
+.kb-del:hover { border-color: #e5484d; }

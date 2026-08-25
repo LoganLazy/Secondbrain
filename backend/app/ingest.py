@@ -110,11 +110,14 @@ def analyze(text_sample: str) -> dict:
     }
 
 
-def ingest(path: Path, display_name: str | None = None, keep_path: Path | None = None) -> dict:
+def ingest(path: Path, display_name: str | None = None,
+           keep_path: Path | None = None, kb_id: str = "default") -> dict:
     fh = file_hash(path)
-    exist = db.get().execute("SELECT * FROM docs WHERE file_hash=?", (fh,)).fetchone()
+    exist = db.get().execute(
+        "SELECT * FROM docs WHERE file_hash=? AND kb_id=?", (fh, kb_id)
+    ).fetchone()
     if exist:
-        raise ValueError(f"文档已存在: {exist['title'] or exist['filename']}")
+        raise ValueError(f"该库中已有此文档: {exist['title'] or exist['filename']}")
 
     pages = parser.parse(path)
     chunks = parser.chunk_text(pages)
@@ -126,7 +129,7 @@ def ingest(path: Path, display_name: str | None = None, keep_path: Path | None =
 
     ids = [f"{fh}_{i}" for i in range(len(chunks))]
     metadatas = [
-        {"file_hash": fh, "page": c["page"], "chunk_index": i}
+        {"file_hash": fh, "page": c["page"], "chunk_index": i, "kb_id": kb_id}
         for i, c in enumerate(chunks)
     ]
     _col.add(ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas)
@@ -142,11 +145,11 @@ def ingest(path: Path, display_name: str | None = None, keep_path: Path | None =
 
     stored = str(keep_path) if keep_path else ""
     cur = db.get().execute(
-        "INSERT INTO docs(filename,title,category,tags,summary,chunks,file_hash,created,file_path)"
-        " VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO docs(filename,title,category,tags,summary,chunks,file_hash,"
+        "created,file_path,kb_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (display_name or path.name, info["title"], info["category"],
          json.dumps(info["tags"], ensure_ascii=False),
-         info["summary"], len(chunks), fh, db.now(), stored),
+         info["summary"], len(chunks), fh, db.now(), stored, kb_id),
     )
     db.get().commit()
     return {"id": cur.lastrowid, **info, "chunks": len(chunks),
@@ -220,12 +223,13 @@ def _ensure_bm25():
         bm25.INDEX.add(cid, text, meta)
 
 
-def search(query: str, k: int | None = None, where: dict | None = None) -> list[dict]:
+def search(query: str, k: int | None = None, kb_id: str = "default") -> list[dict]:
     """混合检索: 向量语义 + BM25关键词, 加权融合"""
     import os
 
     k = k or config.get("TOP_K")
     fetch = max(k * 3, 12)
+    where = {"kb_id": kb_id}
 
     # --- 向量路 ---
     vec_results = {}
