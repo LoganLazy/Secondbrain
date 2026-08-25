@@ -1,8 +1,11 @@
 <template>
   <Sidebar :tab="tab" ref="sidebar" @change="tab = $event" />
   <main class="main">
-    <ChatView v-if="tab === 'chat'" />
-    <LibraryView v-else-if="tab === 'library'" @uploaded="sidebar && sidebar.load()" />
+    <template v-if="tab === 'reader' && reading">
+      <ReaderView :doc="reading" @close="tab = 'library'; reading = null" />
+    </template>
+    <ChatView v-else-if="tab === 'chat'" />
+    <LibraryView v-else-if="tab === 'library'" @openDoc="openReader" @uploaded="sidebar && sidebar.load()" />
     <MemoryView v-else />
   </main>
 </template>
@@ -13,9 +16,21 @@ import Sidebar from "./components/Sidebar.vue"
 import ChatView from "./components/ChatView.vue"
 import LibraryView from "./components/LibraryView.vue"
 import MemoryView from "./components/MemoryView.vue"
+import ReaderView from "./components/ReaderView.vue"
 
 const tab = ref("chat")
 const sidebar = ref(null)
+const reading = ref(null)
+
+function openReader(s) {
+  // s: {doc_id, title, filename}
+  reading.value = {
+    id: s.doc_id ?? s.id,
+    title: s.title,
+    filename: s.filename
+  }
+  tab.value = "reader"
+}
 </script>
 
 <style scoped>

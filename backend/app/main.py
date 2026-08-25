@@ -1,4 +1,5 @@
 """FastAPI 入口"""
+import hashlib
 import json
 import shutil
 import tempfile
@@ -35,17 +36,55 @@ async def upload(file: UploadFile = File(...)):
     suffix = Path(file.filename).suffix.lower()
     if suffix not in (".pdf", ".docx", ".txt", ".md"):
         raise HTTPException(400, f"暂不支持 {suffix}，目前支持 pdf/docx/txt/md")
-    tmp = Path(tempfile.gettempdir()) / f"memai_{file.filename}"
-    shutil.copyfileobj(file.file, open(tmp, "wb"))
+
+    # 先落盘到持久目录(阅读器需要原文)
+    fh_tmp = hashlib.md5(file.filename.encode()).hexdigest()[:8]
+    dest = config.UPLOAD_DIR / f"{fh_tmp}_{file.filename}"
+    with open(dest, "wb") as out:
+        shutil.copyfileobj(file.file, out)
     try:
-        info = ingest.ingest(tmp, display_name=file.filename)
+        info = ingest.ingest(dest, display_name=file.filename, keep_path=dest)
         return {"code": 0, "doc": info}
     except ValueError as e:
+        dest.unlink(missing_ok=True)
         raise HTTPException(400, str(e))
     except Exception as e:
+        dest.unlink(missing_ok=True)
         raise HTTPException(500, f"处理失败: {e}")
-    finally:
-        Path(tmp.name).unlink(missing_ok=True)
+
+
+@app.get("/api/docs/{doc_id}/content")
+def doc_content(doc_id: int):
+    try:
+        return {"code": 0, "pages": ingest.doc_pages(doc_id)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+class AssistIn(BaseModel):
+    question: str
+    passage: str = ""
+    title: str = ""
+    page: int | None = None
+
+
+@app.post("/api/assist")
+def assist(a: AssistIn):
+    """阅读助手: 基于指定段落/全文回答, 不走知识库检索"""
+    sys_prompt = (
+        "你是Memory AI的阅读助手。用户正在阅读自己的文档"
+        + (f"《{a.title}》第{a.page}页" if a.page else f"《{a.title}》" if a.title else "")
+        + "。用简洁中文回答；若提供了文档片段，答案必须基于片段内容。"
+    )
+    user = a.question
+    if a.passage:
+        user = f"文档片段:\n{a.passage[:6000]}\n\n问题: {a.question}"
+    messages = [{"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user}]
+    try:
+        return {"code": 0, "answer": ingest.call_chat(messages, temperature=0.4)}
+    except Exception as e:
+        raise HTTPException(500, f"AI调用失败: {e}")
 
 
 @app.get("/api/docs")

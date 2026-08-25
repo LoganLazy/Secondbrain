@@ -35,6 +35,10 @@ def get() -> sqlite3.Connection:
             );
             """
         )
+        # 轻量迁移: 老库补列
+        cols = [r[1] for r in _conn.execute("PRAGMA table_info(docs)")]
+        if "file_path" not in cols:
+            _conn.execute("ALTER TABLE docs ADD COLUMN file_path TEXT")
         _conn.commit()
     return _conn
 

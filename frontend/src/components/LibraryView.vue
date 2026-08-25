@@ -13,7 +13,8 @@
 
     <div v-if="hits !== null" class="hits">
       <h4>搜索结果（{{ hits.length }}）<button class="linkbtn" @click="clearSearch">返回列表</button></h4>
-      <div v-for="(h, i) in hits" :key="i" class="hit card">
+      <div v-for="(h, i) in hits" :key="i" class="hit card" style="cursor:pointer"
+           @click="$emit('openDoc', h)">
         <div class="hit-head">
           📄 {{ h.title }} · 第{{ h.page }}页
           <span class="score">{{ Math.round(h.score * 100) }}% 匹配</span>
@@ -24,10 +25,10 @@
     </div>
 
     <div v-else class="docs">
-      <div v-for="d in docs" :key="d.id" class="card doc">
+      <div v-for="d in docs" :key="d.id" class="card doc" style="cursor:pointer" @click="$emit('openDoc', d)">
         <div class="doc-main">
           <div class="doc-title">
-            {{ d.title || d.filename }}
+            📄 {{ d.title || d.filename }}
             <span class="cat">{{ d.category }}</span>
           </div>
           <div class="doc-summary">{{ d.summary || "（暂无摘要）" }}</div>
@@ -46,6 +47,8 @@
 <script setup>
 import { ref, onMounted } from "vue"
 import { api } from "../api"
+
+defineEmits(["openDoc", "uploaded"])
 
 const docs = ref([])
 const q = ref("")

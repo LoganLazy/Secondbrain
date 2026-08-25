@@ -60,7 +60,7 @@ def analyze(text_sample: str) -> dict:
     }
 
 
-def ingest(path: Path, display_name: str | None = None) -> dict:
+def ingest(path: Path, display_name: str | None = None, keep_path: Path | None = None) -> dict:
     fh = file_hash(path)
     exist = db.get().execute("SELECT * FROM docs WHERE file_hash=?", (fh,)).fetchone()
     if exist:
@@ -88,16 +88,36 @@ def ingest(path: Path, display_name: str | None = None) -> dict:
         **{k: v for k, v in info.items() if k != "title"},
     }
 
+    stored = str(keep_path) if keep_path else ""
     cur = db.get().execute(
-        "INSERT INTO docs(filename,title,category,tags,summary,chunks,file_hash,created)"
-        " VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO docs(filename,title,category,tags,summary,chunks,file_hash,created,file_path)"
+        " VALUES(?,?,?,?,?,?,?,?,?)",
         (display_name or path.name, info["title"], info["category"],
          json.dumps(info["tags"], ensure_ascii=False),
-         info["summary"], len(chunks), fh, db.now()),
+         info["summary"], len(chunks), fh, db.now(), stored),
     )
     db.get().commit()
     return {"id": cur.lastrowid, **info, "chunks": len(chunks),
             "filename": display_name or path.name}
+
+
+def get_doc(doc_id: int):
+    row = db.get().execute(
+        "SELECT id,filename,title,file_path FROM docs WHERE id=?", (doc_id,)
+    ).fetchone()
+    if not row:
+        raise ValueError("文档不存在")
+    return row
+
+
+def doc_pages(doc_id: int) -> list[dict]:
+    """读取原文并返回按页文本(阅读器用)"""
+    row = get_doc(doc_id)
+    fp = row["file_path"]
+    if not fp or not Path(fp).exists():
+        raise ValueError("原文文件已丢失，请重新上传")
+    pages = parser.parse(Path(fp))
+    return [{"page": p, "text": t} for t, p in pages]
 
 
 def delete_doc(doc_id: int):
