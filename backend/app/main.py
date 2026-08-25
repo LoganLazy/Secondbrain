@@ -1,9 +1,7 @@
 """FastAPI 入口"""
 import hashlib
-import re
-import hashlib
-import re
 import json
+import re
 import threading
 import time
 import shutil
@@ -19,6 +17,10 @@ from . import config, db, ingest, rag
 from . import cards as cards_mod
 
 app = FastAPI(title="Memory AI")
+
+
+def log(msg: str):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def KB(request) -> str:
@@ -59,8 +61,10 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
             results.append({"file": file.filename, "ok": False,
                             "msg": f"暂不支持 {suffix} 格式"})
             continue
+        kb_dir = config.UPLOAD_DIR / KB(request)
+        kb_dir.mkdir(parents=True, exist_ok=True)
         fh_tmp = hashlib.md5(file.filename.encode()).hexdigest()[:8]
-        dest = config.UPLOAD_DIR / f"{fh_tmp}_{file.filename}"
+        dest = kb_dir / f"{fh_tmp}_{file.filename}"
         with open(dest, "wb") as out:
             shutil.copyfileobj(file.file, out)
         try:
@@ -453,6 +457,8 @@ def create_kb(body: dict):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "名称不能为空")
+    if any(ch in name for ch in '/\\:*?"<>|'):
+        raise HTTPException(400, "名称不能包含 \\ / : * ? 等符号")
     import random
     kid = "kb_" + "".join(random.choices("0123456789abcdef", k=6))
     while db.get().execute("SELECT 1 FROM kbs WHERE id=?", (kid,)).fetchone():
@@ -460,6 +466,10 @@ def create_kb(body: dict):
     db.get().execute("INSERT INTO kbs(id,name,created) VALUES(?,?,?)",
                      (kid, name, db.now()))
     db.get().commit()
+    try:
+        (config.INBOX_DIR / name).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     return {"code": 0, "id": kid, "name": name}
 
 
@@ -476,8 +486,11 @@ def delete_kb(kb_id: str):
             pass
     db.get().execute("DELETE FROM flashcards WHERE kb_id=?", (kb_id,))
     db.get().execute("DELETE FROM chats WHERE kb_id=?", (kb_id,))
+    row = db.get().execute("SELECT name FROM kbs WHERE id=?", (kb_id,)).fetchone()
     db.get().execute("DELETE FROM kbs WHERE id=?", (kb_id,))
     db.get().commit()
+    if row:
+        shutil.rmtree(config.INBOX_DIR / row["name"], ignore_errors=True)
     return {"code": 0}
 
 
@@ -559,36 +572,100 @@ _importing_lock = threading.Lock()
 
 
 def scan_inbox():
-    """扫描 知识库文件夹/, 自动导入新文件; 成功移到 已导入/, 失败移到 失败/"""
+    """扫描 知识库文件夹/, 每个知识库一个同名子文件夹.
+    丢进哪个文件夹就导入哪个库; 根目录散落文件归入默认库."""
     if not _importing_lock.acquire(blocking=False):
         return
     try:
-        done_dir = config.INBOX_DIR / "已导入"
-        fail_dir = config.INBOX_DIR / "失败"
-        for d in (done_dir, fail_dir):
-            d.mkdir(exist_ok=True)
-        for f in sorted(config.INBOX_DIR.iterdir()):
-            if not f.is_file() or f.suffix.lower() not in (".pdf", ".docx", ".txt", ".md"):
-                continue
+        # 为每个库准备同名收件夹
+        kbs = db.get().execute("SELECT id,name FROM kbs").fetchall()
+        folders: list[tuple[str, str]] = []   # (path, kb_id)
+        for r in kbs:
             try:
-                info = ingest.ingest(f, display_name=f.name, keep_path=f)
-                shutil.move(str(f), str(done_dir / f.name))
-                log(f"[自动导入] 成功: {f.name} -> 《{info['title']}》")
-            except ValueError as e:
-                if "已存在" in str(e):
-                    shutil.move(str(f), str(done_dir / f.name))
-                    log(f"[自动导入] 跳过重复: {f.name}")
-                else:
-                    shutil.move(str(f), str(fail_dir / f.name))
-                    log(f"[自动导入] 失败: {f.name}: {e}")
-            except Exception as e:
-                shutil.move(str(f), str(fail_dir / f.name))
-                log(f"[自动导入] 失败: {f.name}: {e}")
+                d = config.INBOX_DIR / r["name"]
+                d.mkdir(parents=True, exist_ok=True)
+                folders.append((str(d), r["id"]))
+            except OSError:
+                continue
+        # 根目录散落文件 -> 默认库
+        for f in sorted(config.INBOX_DIR.iterdir()):
+            if f.is_file():
+                target = config.UPLOAD_DIR / "default"
+                target.mkdir(parents=True, exist_ok=True)
+                moved = target / f.name
+                shutil.move(str(f), str(moved))
+                folders.insert(0, (str(target), "default"))
+                _ingest_one(moved, "default")
+                folders.pop(0)
+
+        for path_str, kb_id in folders:
+            folder = Path(path_str)
+            done_dir = folder / "已导入"
+            fail_dir = folder / "失败"
+            for d in (done_dir, fail_dir):
+                d.mkdir(exist_ok=True)
+            for f in sorted(folder.iterdir()):
+                if not f.is_file() or f.suffix.lower() not in (
+                        ".pdf", ".docx", ".txt", ".md",
+                        ".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+                    continue
+                _import_file(f, kb_id, done_dir, fail_dir)
     finally:
         _importing_lock.release()
 
 
+def _import_file(f: Path, kb_id: str, done_dir: Path, fail_dir: Path):
+    """处理单个待导入文件"""
+    import time as _time
+    stamp = _time.strftime("%H%M%S")
+    try:
+        info = ingest.ingest(f, display_name=f.name, keep_path=f, kb_id=kb_id)
+        dest = done_dir / f"{stamp}_{f.name}"
+        shutil.move(str(f), str(dest))
+        log(f"[自动导入] 成功({kb_id}): {f.name} -> 《{info['title']}》")
+    except ValueError as e:
+        if "已存在" in str(e) or "已有此文档" in str(e):
+            shutil.move(str(f), str(done_dir / f"{stamp}_{f.name}"))
+            log(f"[自动导入] 跳过重复({kb_id}): {f.name}")
+        else:
+            shutil.move(str(f), str(fail_dir / f"{stamp}_{f.name}"))
+            log(f"[自动导入] 失败({kb_id}): {f.name}: {e}")
+    except Exception as e:
+        shutil.move(str(f), str(fail_dir / f"{stamp}_{f.name}"))
+        log(f"[自动导入] 失败({kb_id}): {f.name}: {e}")
+
+
+def migrate_uploads():
+    """存量文件按所属库归入子目录"""
+    conn = db.get()
+    rows = conn.execute(
+        "SELECT id, file_path, kb_id FROM docs WHERE file_path IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        fp = Path(r["file_path"])
+        if not fp.exists():
+            continue
+        # 已经在子目录里的跳过
+        if fp.parent != config.UPLOAD_DIR:
+            continue
+        target_dir = config.UPLOAD_DIR / (r["kb_id"] or "default")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / fp.name
+        try:
+            shutil.move(str(fp), str(target))
+            conn.execute("UPDATE docs SET file_path=? WHERE id=?",
+                         (str(target), r["id"]))
+            log(f"[迁移] {fp.name} -> {r['kb_id']}/")
+        except OSError as e:
+            log(f"[迁移] 失败: {fp.name}: {e}")
+    conn.commit()
+
+
 def inbox_loop():
+    try:
+        migrate_uploads()
+    except Exception as e:
+        print("[迁移] 失败:", e, flush=True)
     while True:
         try:
             scan_inbox()
