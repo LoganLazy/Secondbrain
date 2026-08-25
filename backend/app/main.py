@@ -53,7 +53,9 @@ async def upload(files: list[UploadFile] = File(...)):
             results.append({"file": file.filename, "ok": True,
                             "title": info["title"], "id": info["id"]})
         except ValueError as e:
-            dest.unlink(missing_ok=True)
+            # 注意: "文档已存在"时不能删除dest, 它可能就是库里已有文档的原文!
+            if "已存在" not in str(e):
+                dest.unlink(missing_ok=True)
             results.append({"file": file.filename, "ok": False, "msg": str(e)})
         except Exception as e:
             dest.unlink(missing_ok=True)
@@ -99,7 +101,8 @@ def assist(a: AssistIn):
 @app.get("/api/docs")
 def list_docs():
     rows = db.get().execute(
-        "SELECT id,filename,title,category,tags,summary,chunks,created"
+        "SELECT id,filename,title,category,tags,summary,chunks,created,"
+        "(file_path IS NOT NULL AND file_path!='') AS has_file"
         " FROM docs ORDER BY id DESC"
     ).fetchall()
     return [

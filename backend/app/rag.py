@@ -53,7 +53,7 @@ def chat(question: str) -> dict:
     except Exception as e:
         return {"answer": f"AI调用失败({e}), 请检查网络或Key配置", "sources": []}
 
-    sources = [{"title": h["title"], "filename": h["filename"],
+    sources = [{"doc_id": h["doc_id"], "title": h["title"], "filename": h["filename"],
                 "page": h["page"], "score": round(h["score"], 3)}
                for h in hits]
     save_chat("user", question)

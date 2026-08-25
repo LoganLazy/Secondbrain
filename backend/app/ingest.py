@@ -19,18 +19,31 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def call_chat(messages: list[dict], temperature: float = 0.3) -> str:
+def call_chat(messages: list[dict], temperature: float = 0.3,
+              max_tokens: int = 2000) -> str:
     import httpx
 
-    r = httpx.post(
-        config.CHAT_BASE_URL.rstrip("/") + "/chat/completions",
-        headers={"Authorization": f"Bearer {config.CHAT_KEY}"},
-        json={"model": config.CHAT_MODEL, "messages": messages,
-              "temperature": temperature, "max_tokens": 600},
-        timeout=120,
-    )
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    # 推理模型会先消耗token思考, 预算不足会导致正文为空
+    for budget in (max_tokens, max_tokens * 3, max_tokens * 5):
+        r = httpx.post(
+            config.CHAT_BASE_URL.rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {config.CHAT_KEY}"},
+            json={"model": config.CHAT_MODEL, "messages": messages,
+                  "temperature": temperature, "max_tokens": budget},
+            timeout=180,
+        )
+        r.raise_for_status()
+        data = r.json()
+        msg = data["choices"][0]["message"]
+        content = (msg.get("content") or "").strip()
+        if content:
+            return content
+        # 正文为空但思考有内容 => token被思考耗尽, 加大预算重试
+        if data["choices"][0].get("finish_reason") == "length":
+            continue
+        # 模型明确拒答等场景, 直接返回原样
+        return "(AI未能给出有效回答，请换个问法试试)"
+    return "(回答超时或被截断，请重试)"
 
 
 ANALYZE_PROMPT = (

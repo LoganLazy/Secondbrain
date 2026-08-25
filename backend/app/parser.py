@@ -12,7 +12,20 @@ def parse(path: Path) -> list[tuple[str, int]]:
     if suffix == ".docx":
         return _parse_docx(path)
     if suffix in (".txt", ".md", ""):
-        return [(path.read_text(encoding="utf-8", errors="ignore"), 1)]
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        # 支持重建文件里的分页标记 <!-- 第N页 -->
+        if "<!-- 第" in text and "页 -->" in text:
+            import re
+
+            parts = re.split(r"<!--\s*第(\d+)页\s*-->", text)
+            pages_out = []
+            for i in range(1, len(parts), 2):
+                body = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                if body:
+                    pages_out.append((body, int(parts[i])))
+            if pages_out:
+                return pages_out
+        return [(text, 1)]
     raise ValueError(f"暂不支持的格式: {suffix}")
 
 
