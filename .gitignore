@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 core.*
 frontend/dist/
+backend/.pid
