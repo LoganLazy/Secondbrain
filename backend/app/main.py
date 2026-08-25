@@ -1,6 +1,8 @@
 """FastAPI 入口"""
 import hashlib
+import hashlib
 import json
+import threading
 import shutil
 import tempfile
 from pathlib import Path
@@ -33,25 +35,31 @@ class MemoryIn(BaseModel):
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in (".pdf", ".docx", ".txt", ".md"):
-        raise HTTPException(400, f"暂不支持 {suffix}，目前支持 pdf/docx/txt/md")
-
-    # 先落盘到持久目录(阅读器需要原文)
-    fh_tmp = hashlib.md5(file.filename.encode()).hexdigest()[:8]
-    dest = config.UPLOAD_DIR / f"{fh_tmp}_{file.filename}"
-    with open(dest, "wb") as out:
-        shutil.copyfileobj(file.file, out)
-    try:
-        info = ingest.ingest(dest, display_name=file.filename, keep_path=dest)
-        return {"code": 0, "doc": info}
-    except ValueError as e:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(500, f"处理失败: {e}")
+async def upload(files: list[UploadFile] = File(...)):
+    """支持多文件上传, 返回每个文件的结果"""
+    results = []
+    for file in files:
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in (".pdf", ".docx", ".txt", ".md"):
+            results.append({"file": file.filename, "ok": False,
+                            "msg": f"暂不支持 {suffix} 格式"})
+            continue
+        fh_tmp = hashlib.md5(file.filename.encode()).hexdigest()[:8]
+        dest = config.UPLOAD_DIR / f"{fh_tmp}_{file.filename}"
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(file.file, out)
+        try:
+            info = ingest.ingest(dest, display_name=file.filename, keep_path=dest)
+            results.append({"file": file.filename, "ok": True,
+                            "title": info["title"], "id": info["id"]})
+        except ValueError as e:
+            dest.unlink(missing_ok=True)
+            results.append({"file": file.filename, "ok": False, "msg": str(e)})
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            results.append({"file": file.filename, "ok": False,
+                            "msg": f"处理失败: {e}"})
+    return {"code": 0, "results": results}
 
 
 @app.get("/api/docs/{doc_id}/content")
@@ -120,7 +128,51 @@ def search(q: SearchQ):
 
 @app.post("/api/chat")
 def chat(qa: QA):
-    return rag.chat(qa.question)
+    result = rag.chat(qa.question)
+    # 后台自动提取长期记忆, 不阻塞回答
+    threading.Thread(
+        target=auto_memory, args=(qa.question, result.get("answer", "")),
+        daemon=True,
+    ).start()
+    return result
+
+
+def auto_memory(question: str, answer: str):
+    """从对话中自动提取值得长期记住的用户信息"""
+    try:
+        existing = [r["content"] for r in db.get().execute(
+            "SELECT content FROM memories ORDER BY id DESC LIMIT 100")]
+        prompt = (
+            "从下面的用户对话中, 提取值得AI长期记住的【用户个人信息/设备/偏好/背景】"
+            "(例如: 有什么服务器、用什么工具、职业、习惯)。"
+            "只提取明确提到的事实, 没有就返回[]。"
+            '只返回JSON数组如["事实1","事实2"]\n\n'
+            f"用户问: {question[:300]}\nAI答: {answer[:300]}"
+        )
+        raw = ingest.call_chat(
+            [{"role": "system", "content": prompt},
+             {"role": "user", "content": prompt.split("\n\n")[-1]}],
+            temperature=0.2,
+        )
+        s = raw[raw.find("["): raw.rfind("]") + 1]
+        facts = json.loads(s)
+        if not isinstance(facts, list):
+            return
+        for fact in facts[:3]:
+            fact = str(fact).strip()[:120]
+            if len(fact) < 4:
+                continue
+            # 去重: 与已有记忆高度重合则跳过
+            if any(fact[:20] in e or e[:20] in fact for e in existing):
+                continue
+            db.get().execute(
+                "INSERT INTO memories(content,created) VALUES(?,?)",
+                (fact, db.now()),
+            )
+            db.get().commit()
+            existing.insert(0, fact)
+    except Exception as e:
+        print(f"[auto_memory] 提取失败(不影响使用): {e}", flush=True)
 
 
 @app.get("/api/history")

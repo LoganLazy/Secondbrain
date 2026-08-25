@@ -2,14 +2,22 @@
   <div class="lib">
     <div class="toolbar">
       <label class="upbtn" :class="{ busy }">
-        {{ busy ? "处理中…" : "＋ 上传文档 (pdf / docx / txt / md)" }}
-        <input type="file" accept=".pdf,.docx,.txt,.md" hidden @change="onFile" />
+        {{ busy ? "处理中…" : "＋ 上传文档 (可多选)" }}
+        <input type="file" accept=".pdf,.docx,.txt,.md" multiple hidden @change="onFile" />
       </label>
       <input v-model="q" class="search" placeholder="🔍 语义搜索：用大白话描述你要找的东西，Enter 搜索"
              @keydown.enter="doSearch" />
     </div>
 
     <div v-if="err" class="err">{{ err }}</div>
+    <div v-if="results.length" class="up-results card">
+      <div v-for="(r, i) in results" :key="i" class="up-line">
+        {{ r.ok ? "✅" : "❌" }} {{ r.file }}
+        <span v-if="r.ok">→ 《{{ r.title }}》</span>
+        <span v-else class="up-err">{{ r.msg }}</span>
+      </div>
+      <button class="linkbtn" @click="results = []">知道了</button>
+    </div>
 
     <div v-if="hits !== null" class="hits">
       <h4>搜索结果（{{ hits.length }}）<button class="linkbtn" @click="clearSearch">返回列表</button></h4>
@@ -55,6 +63,7 @@ const q = ref("")
 const hits = ref(null)
 const busy = ref(false)
 const err = ref("")
+const results = ref([])
 
 onMounted(load)
 async function load() {
@@ -62,13 +71,15 @@ async function load() {
 }
 
 async function onFile(e) {
-  const file = e.target.files[0]
+  const files = [...e.target.files]
   e.target.value = ""
-  if (!file) return
+  if (!files.length) return
   busy.value = true
   err.value = ""
+  results.value = []
   try {
-    await api.upload(file)
+    const r = await api.uploadFiles(files)
+    results.value = r.results || []
     await load()
   } catch (ex) {
     err.value = "上传失败: " + ex.message
@@ -162,4 +173,7 @@ function fmtTime(t) {
   background: none; border: none; color: var(--accent);
   cursor: pointer; margin-left: 12px; font-size: 13px;
 }
+.up-results { border: 1px solid var(--border); }
+.up-line { padding: 4px 0; font-size: 14px; }
+.up-err { color: #ff9b9b; }
 </style>

@@ -13,7 +13,6 @@
       <button :class="{ active: tab === 'library' }" @click="$emit('change', 'library')">📚 知识库</button>
       <button :class="{ active: tab === 'memory' }" @click="$emit('change', 'memory')">🧷 长期记忆</button>
       <button :class="{ active: tab === 'cards' }" @click="$emit('change', 'cards')">🃏 复习闪卡</button>
-      <button :class="{ active: tab === 'cards' }" @click="$emit('change', 'cards')">🃏 复习闪卡</button>
     </nav>
 
     <div class="stats">

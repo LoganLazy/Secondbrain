@@ -28,9 +28,9 @@ export const api = {
   fcStats: () => jfetch("/api/flashcards/stats"),
   delCard: (id) => jfetch(`/api/flashcards/${id}`, { method: "DELETE" }),
 
-  async upload(file, onProgress) {
+  async uploadFiles(files) {
     const fd = new FormData()
-    fd.append("file", file)
+    files.forEach((f) => fd.append("files", f))
     const r = await fetch(BASE + "/api/upload", { method: "POST", body: fd })
     if (!r.ok) {
       let msg = `HTTP ${r.status}`

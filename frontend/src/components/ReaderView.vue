@@ -7,6 +7,7 @@
         <span class="doc-title">{{ doc.title || doc.filename }}</span>
       </div>
       <div class="pages" ref="pagesBox">
+        <div v-if="loadErr" class="load-err">{{ loadErr }}</div>
         <div v-for="p in pages" :key="p.page" class="page">
           <div class="page-no">第 {{ p.page }} 页</div>
           <div
@@ -65,6 +66,7 @@ const floatY = ref(0)
 const draft = ref("")
 const aiBox = ref(null)
 const pagesBox = ref(null)
+const loadErr = ref("")
 
 const quicks = [
   { label: "📝 总结全文", question: "请总结这份文档的核心内容", scope: "all" },
@@ -75,9 +77,14 @@ const quicks = [
 ]
 
 api.docs().then(async () => {
-  const res = await fetch(`/api/docs/${props.doc.id}/content`)
-  const r = await res.json()
-  pages.value = r.pages
+  try {
+    const res = await fetch(`/api/docs/${props.doc.id}/content`)
+    const r = await res.json()
+    if (!res.ok) throw new Error(r.detail || "加载失败")
+    pages.value = r.pages
+  } catch (e) {
+    loadErr.value = "原文加载失败: " + e.message + "（可能已被删除或丢失，请重新上传）"
+  }
 })
 
 function currentPage() {
@@ -188,6 +195,10 @@ function scroll() {
   cursor: text;
 }
 .page-no { color: #aaa; font-size: 12px; margin-bottom: 8px; user-select: none; }
+.load-err {
+  background: #3a2226; color: #ff9b9b;
+  border-radius: 10px; padding: 16px 20px; font-size: 14px;
+}
 
 .sel-float {
   position: fixed;

@@ -4,7 +4,7 @@
     <template v-if="tab === 'reader' && reading">
       <ReaderView :doc="reading" @close="tab = 'library'; reading = null" />
     </template>
-    <ChatView v-else-if="tab === 'chat'" />
+    <ChatView v-else-if="tab === 'chat'" @openDoc="openReader" />
     <LibraryView v-else-if="tab === 'library'" @openDoc="openReader" @uploaded="sidebar && sidebar.load()" />
     <FlashcardsView v-else-if="tab === 'cards'" />
     <MemoryView v-else />

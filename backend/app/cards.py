@@ -55,11 +55,17 @@ def generate(doc_id: int, num: int = 10) -> int:
     ensure_table()
     now = db.now()
     n = 0
+    exist_qs = {r[0].lower() for r in db.get().execute(
+        "SELECT q FROM flashcards WHERE doc_id=?", (doc_id,))}
     for c in cards[:20]:
         if isinstance(c, dict) and c.get("q") and c.get("a"):
+            q = str(c["q"]).strip()
+            if q.lower() in exist_qs:  # 去重
+                continue
+            exist_qs.add(q.lower())
             db.get().execute(
                 "INSERT INTO flashcards(doc_id,q,a,created) VALUES(?,?,?,?)",
-                (doc_id, str(c["q"]).strip(), str(c["a"]).strip(), now),
+                (doc_id, q, str(c["a"]).strip(), now),
             )
             n += 1
     db.get().commit()
