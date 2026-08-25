@@ -5,7 +5,10 @@ from pathlib import Path
 
 import sys
 
-if getattr(sys, "frozen", False):  # PyInstaller打包后: 数据放在exe旁边, 用户可见可备份
+_home = os.environ.get("MEMORY_AI_HOME")
+if _home:  # 打包版由Electron壳指定便携数据根(exe所在目录)
+    BASE_DIR = Path(_home)
+elif getattr(sys, "frozen", False):  # 单文件运行: 数据放exe旁边
     BASE_DIR = Path(sys.executable).resolve().parent
 else:
     BASE_DIR = Path(__file__).resolve().parent.parent

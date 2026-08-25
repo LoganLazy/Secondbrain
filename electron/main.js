@@ -4,49 +4,87 @@ const path = require("path")
 const http = require("http")
 
 const PORT = 8787
+let backendProc = null
+let win = null
 
-function startBackend() {
-  const backendDir = path.join(__dirname, "..", "backend")
-  const py = path.join(backendDir, ".venv", "bin", "python")
+// 便携模式: 数据/知识库文件夹 放在 exe 同级目录
+function homeDir() {
   try {
-    spawn(py, ["start_daemon.py"], { cwd: backendDir, stdio: "ignore" }).unref()
+    const dir = path.dirname(app.getPath("exe"))
+    require("fs").accessSync(dir, require("fs").constants.W_OK)
+    return dir
   } catch (e) {
-    console.error("后端启动失败:", e)
+    return app.getPath("userData") // 无写权限时退回用户数据目录
   }
 }
 
-function waitBackend(cb, tries = 30) {
+function startBackend() {
+  // 打包版: resources/backend/MemoryAI-backend/MemoryAI-backend.exe
+  const res = process.resourcesPath || path.join(__dirname, "resources")
+  const candidates = [
+    path.join(res, "backend", "MemoryAI-backend", "MemoryAI-backend.exe"),
+    path.join(__dirname, "..", "server", "MemoryAI-backend.exe"),
+  ]
+  const exe = candidates.find((p) => {
+    try { return require("fs").existsSync(p) } catch (e) { return false }
+  })
+  if (!exe) {
+    console.log("[MemoryAI] 未找到后端引擎, 若服务已手动启动可直接使用")
+    return
+  }
+  backendProc = spawn(exe, [], {
+    cwd: homeDir(),
+    env: { ...process.env, MEMORY_AI_HOME: homeDir() },
+    stdio: "ignore",
+    windowsHide: true,
+  })
+}
+
+function waitServer(cb, tries = 60) {
   const req = http.get(`http://127.0.0.1:${PORT}/api/stats`, (res) => {
     res.resume()
     cb()
   })
   req.on("error", () => {
-    if (tries-- <= 0) {
-      cb()
-      return
-    }
-    setTimeout(() => waitBackend(cb, tries), 800)
+    if (tries-- <= 0) return cb()
+    setTimeout(() => waitServer(cb, tries), 800)
   })
-  req.setTimeout(1500, () => {
-    req.destroy()
-  })
+  req.setTimeout(1500, () => req.destroy())
 }
 
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 1300,
-    height: 850,
+  win = new BrowserWindow({
+    width: 1320,
+    height: 860,
     title: "Memory AI",
     autoHideMenuBar: true,
     backgroundColor: "#0f1115",
-    webPreferences: { contextIsolation: true }
+    webPreferences: { contextIsolation: true },
   })
   win.loadURL(`http://127.0.0.1:${PORT}`)
+  win.on("closed", () => (win = null))
 }
 
-app.whenReady().then(() => {
-  startBackend()
-  waitBackend(createWindow)
-})
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on("second-instance", () => {
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+  })
 
-app.on("window-all-closed", () => app.quit())
+  app.whenReady().then(() => {
+    startBackend()
+    waitServer(createWindow)
+  })
+
+  app.on("window-all-closed", () => {
+    if (backendProc) {
+      try { backendProc.kill() } catch (e) {}
+    }
+    app.quit()
+  })
+}

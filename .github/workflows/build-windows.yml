@@ -28,16 +28,11 @@ jobs:
           npm ci || npm install --no-audit --no-fund
           npm run build
 
-      - name: Install backend deps
+      - name: Build backend engine (PyInstaller onedir)
         working-directory: backend
         run: |
-          pip install -r requirements.txt
-          pip install pywebview pyinstaller
-
-      - name: Build exe with PyInstaller
-        working-directory: backend
-        run: >
-          pyinstaller --onefile --name MemoryAI
+          pip install -r requirements.txt pyinstaller
+          pyinstaller --onedir --noconsole --name MemoryAI-backend server_entry.py
           --paths .
           --add-data "../frontend/dist;frontend_dist"
           --hidden-import uvicorn.logging
@@ -53,15 +48,23 @@ jobs:
           --hidden-import app.main
           --hidden-import app.rag
           --hidden-import app.cards
-          desktop.py
+
+      - name: Build Electron shell
+        working-directory: electron
+        run: |
+          npm ci || npm install --no-audit --no-fund
+          npx electron-builder --win dir
 
       - name: Assemble portable package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item backend/dist/MemoryAI.exe package/
-          New-Item -ItemType Directory -Force -Path "package/知识库文件夹/默认知识库" | Out-Null
-          Copy-Item README.md package/
+          $root = "package/MemoryAI"
+          New-Item -ItemType Directory -Force -Path "$root/resources/backend", "$root/知识库文件夹/默认知识库" | Out-Null
+          # Electron壳
+          Copy-Item electron/out/win-unpacked/* $root -Recurse -Force
+          # 后端引擎
+          Copy-Item backend/dist/MemoryAI-backend/* "$root/resources/backend/" -Recurse -Force
+          Copy-Item README.md $root/
           Compress-Archive -Path package/* -DestinationPath MemoryAI-Windows-x64.zip
 
       - name: Upload artifact
