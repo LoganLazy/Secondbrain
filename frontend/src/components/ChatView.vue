@@ -1,6 +1,23 @@
 <template>
   <div class="chat">
     <div class="messages" ref="box">
+      <div v-if="review && (review.due_cards || review.picks?.length)" class="review-banner">
+        <div class="rb-line">
+          🔔 今日回顾:
+          <button v-if="review.due_cards" class="rb-btn"
+                  @click="$emit('switchTab', 'cards')">
+            {{ review.due_cards }} 张闪卡待复习 →
+          </button>
+        </div>
+        <div v-if="review.picks?.length" class="rb-picks">
+          推荐重读:
+          <button v-for="p in review.picks" :key="p.id" class="rb-btn"
+                  @click="$emit('openDoc', p)">
+            《{{ p.title || '未命名' }}》
+          </button>
+        </div>
+      </div>
+
       <div v-if="list.length === 0" class="empty">
         <div class="e-icon">💬</div>
         <h3>问点你资料里的事</h3>
@@ -40,14 +57,23 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from "vue"
+import { ref, nextTick, onMounted } from "vue"
 import { api } from "../api"
 
-defineEmits(["openDoc"])
+defineEmits(["openDoc", "switchTab"])
 const list = ref([])
 const draft = ref("")
 const thinking = ref(false)
 const box = ref(null)
+const review = ref(null)
+
+onMounted(async () => {
+  loadHistory()
+  try {
+    const r = await fetch("/api/review/today")
+    review.value = await r.json()
+  } catch (e) {}
+})
 
 async function send() {
   const q = draft.value.trim()
@@ -57,10 +83,43 @@ async function send() {
   thinking.value = true
   scroll()
   try {
-    const r = await api.chat(q)
-    list.value.push({ role: "assistant", content: r.answer, sources: r.sources })
+    const resp = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: q })
+    })
+    if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status)
+    const reader = resp.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ""
+    let cur = null
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      let i
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, i).trim()
+        buf = buf.slice(i + 2)
+        if (!line.startsWith("data:")) continue
+        let ev
+        try { ev = JSON.parse(line.slice(5)) } catch (err) { continue }
+        if (ev.type === "sources") {
+          cur = { role: "assistant", content: "", sources: ev.sources }
+          list.value.push(cur)
+        } else if (ev.type === "delta") {
+          if (!cur || list.value[list.value.length - 1] !== cur) {
+            cur = cur && list.value.includes(cur) ? cur : { role: "assistant", content: "" }
+            list.value.push(cur)
+          }
+          cur.content += ev.text
+          scroll()
+        }
+      }
+    }
+    if (cur && !cur.content) cur.content = "(AI未能给出有效回答，请重试)"
   } catch (e) {
-    list.value.push({ role: "assistant", content: "出错了: " + e.message })
+    list.value.push({ role: "assistant", content: "网络错误: " + e.message })
   }
   thinking.value = false
   scroll()

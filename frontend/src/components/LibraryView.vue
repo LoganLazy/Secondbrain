@@ -85,6 +85,7 @@ async function onFile(e) {
     err.value = "上传失败: " + ex.message
   }
   busy.value = false
+  window.dispatchEvent(new CustomEvent("kb-updated"))
 }
 
 async function doSearch() {

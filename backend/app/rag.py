@@ -22,12 +22,68 @@ def build_context(hits: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def chat(question: str) -> dict:
+def chat_stream(question: str):
+    """流式RAG问答生成器: 先发sources事件, 再逐段delta, 最后done"""
+    hits = search_with_threshold(question)
+
+    if not hits:
+        yield {"type": "sources", "sources": []}
+        text = "你的知识库里还没有找到相关内容，先上传一些资料吧。"
+        yield {"type": "delta", "text": text}
+        save_chat("user", question)
+        save_chat("assistant", text)
+        yield {"type": "done"}
+        return
+
+    yield {"type": "sources",
+           "sources": [{"doc_id": h["doc_id"], "title": h["title"],
+                        "filename": h["filename"], "page": h["page"],
+                        "score": round(h["score"], 3)} for h in hits]}
+
+    context = build_context(hits)
+    history = [
+        {"role": r["role"], "content": r["content"]}
+        for r in db.get().execute(
+            "SELECT role,content FROM chats ORDER BY id DESC LIMIT 6")
+    ][::-1]
+    memories = [r["content"] for r in db.get().execute(
+        "SELECT content FROM memories ORDER BY id DESC LIMIT 20")]
+
+    system = RAG_PROMPT.format(context=context)
+    if memories:
+        system += "\n\n你还长期记得用户的这些情况(可自然参考): " + "；".join(memories)
+
+    messages = [{"role": "system", "content": system}, *history,
+                {"role": "user", "content": question}]
+
+    full = []
+    try:
+        for piece in ingest.call_chat_stream(messages):
+            full.append(piece)
+            yield {"type": "delta", "text": piece}
+    except Exception as e:
+        piece = f"\n\n(AI连接中断: {e})"
+        full.append(piece)
+        yield {"type": "delta", "text": piece}
+
+    answer = "".join(full).strip() or "(AI未能给出有效回答，请重试)"
+    save_chat("user", question)
+    save_chat("assistant", answer,
+              [{"title": h["title"], "filename": h["filename"],
+                "page": h["page"]} for h in hits])
+    yield {"type": "done"}
+
+
+def search_with_threshold(question: str):
     hits = ingest.search(question)
-    # 相对相关度门槛: 过滤掉明显不相关的干扰来源(适配不同向量模型)
     if hits:
         best = max(h["score"] for h in hits)
         hits = [h for h in hits if h["score"] >= best * 0.55 and h["score"] > 0.05]
+    return hits
+
+
+def chat(question: str) -> dict:
+    hits = search_with_threshold(question)
     if not hits:
         answer = "你的知识库里还没有任何资料，先上传一些文档吧。"
         return {"answer": answer, "sources": []}

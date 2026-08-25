@@ -13,7 +13,7 @@
 </template>
 
 <script setup>
-import { ref } from "vue"
+import { ref, onMounted } from "vue"
 import Sidebar from "./components/Sidebar.vue"
 import ChatView from "./components/ChatView.vue"
 import LibraryView from "./components/LibraryView.vue"
@@ -25,6 +25,10 @@ import SettingsView from "./components/SettingsView.vue"
 const tab = ref("chat")
 const sidebar = ref(null)
 const reading = ref(null)
+
+onMounted(() => {
+  window.addEventListener("switch-tab", (e) => { tab.value = e.detail })
+})
 
 function openReader(s) {
   // s: {doc_id, title, filename}

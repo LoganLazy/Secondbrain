@@ -141,6 +141,30 @@ def chat(qa: QA):
     return result
 
 
+@app.post("/api/chat/stream")
+def chat_stream(qa: QA):
+    from fastapi.responses import StreamingResponse
+
+    def gen():
+        for ev in rag.chat_stream(qa.question):
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/review/today")
+def review_today():
+    """每日回顾: 到期闪卡 + 随机推荐重读的文档"""
+    due = cards_mod.due_queue()
+    rows = db.get().execute(
+        "SELECT id,title,summary FROM docs ORDER BY RANDOM() LIMIT 2"
+    ).fetchall()
+    picks = [dict(r) for r in rows]
+    return {"due_cards": len(due), "picks": picks}
+
+
 def auto_memory(question: str, answer: str):
     """从对话中自动提取值得长期记住的用户信息"""
     try:

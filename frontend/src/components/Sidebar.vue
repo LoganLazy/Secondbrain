@@ -33,7 +33,10 @@ defineProps({ tab: String })
 defineEmits(["change"])
 const stats = ref({ docs: 0, chunks: 0 })
 
-onMounted(load)
+onMounted(() => {
+  load()
+  window.addEventListener("kb-updated", load)
+})
 async function load() {
   try { stats.value = await api.stats() } catch (e) {}
 }

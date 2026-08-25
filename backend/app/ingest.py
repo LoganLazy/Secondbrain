@@ -1,11 +1,12 @@
 """入库流水线: 解析->切块->向量化->写Chroma->AI生成标题/分类/标签/摘要"""
 import hashlib
+import os
 import json
 from pathlib import Path
 
 import chromadb
 
-from . import config, db, parser, providers
+from . import bm25, config, db, parser, providers
 
 _client = chromadb.PersistentClient(path=str(config.DATA_DIR / "chroma"))
 _col = _client.get_or_create_collection("knowledge", metadata={"hnsw:space": "cosine"})
@@ -53,6 +54,42 @@ ANALYZE_PROMPT = (
 )
 
 
+def call_chat_stream(messages: list[dict], temperature: float = 0.4,
+                     max_tokens: int = 3000):
+    """SSE流式对话生成器, 逐段yield文本"""
+    import httpx
+
+    budget = max_tokens
+    with httpx.stream(
+        "POST",
+        config.get("CHAT_BASE_URL").rstrip("/") + "/chat/completions",
+        headers={"Authorization": f"Bearer {config.get('DEEPSEEK_KEY')}"},
+        json={"model": config.get("CHAT_MODEL"), "messages": messages,
+              "temperature": temperature, "max_tokens": budget, "stream": True},
+        timeout=300,
+    ) as r:
+        r.raise_for_status()
+        got_any = False
+        for line in r.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                j = json.loads(payload)
+            except Exception:
+                continue
+            delta = j["choices"][0].get("delta", {})
+            piece = delta.get("content") or ""
+            if piece:
+                got_any = True
+                yield piece
+        # 推理模型思考耗尽预算时流里可能一个字都没有
+        if not got_any:
+            yield call_chat(messages, temperature, max_tokens * 3)
+
+
 def analyze(text_sample: str) -> dict:
     sample = text_sample[:3000]
     try:
@@ -93,6 +130,8 @@ def ingest(path: Path, display_name: str | None = None, keep_path: Path | None =
         for i, c in enumerate(chunks)
     ]
     _col.add(ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas)
+    for cid, text, meta in zip(ids, texts, metadatas):
+        bm25.INDEX.add(cid, text, meta)
 
     full_head = "\n".join(texts[:8])
     info = analyze(full_head)
@@ -160,26 +199,121 @@ def delete_doc(doc_id: int):
     db.get().commit()
 
 
+def delete_doc(doc_id: int):
+    row = db.get().execute("SELECT file_hash FROM docs WHERE id=?", (doc_id,)).fetchone()
+    if not row:
+        raise ValueError("文档不存在")
+    ids = _col.get(where={"file_hash": row["file_hash"]})["ids"]
+    for cid in ids:
+        bm25.INDEX.remove(cid)
+    _col.delete(where={"file_hash": row["file_hash"]})
+    db.get().execute("DELETE FROM docs WHERE id=?", (doc_id,))
+    db.get().commit()
+
+
+def _ensure_bm25():
+    """启动后首次检索时, 从Chroma重建关键词索引"""
+    if bm25.INDEX.docs or _col.count() == 0:
+        return
+    res = _col.get(include=["documents", "metadatas"])
+    for cid, text, meta in zip(res["ids"], res["documents"], res["metadatas"]):
+        bm25.INDEX.add(cid, text, meta)
+
+
 def search(query: str, k: int | None = None, where: dict | None = None) -> list[dict]:
+    """混合检索: 向量语义 + BM25关键词, 加权融合"""
+    import os
+
     k = k or config.get("TOP_K")
-    if _col.count() == 0:
-        return []
-    vec = providers.embed([query])[0]
-    res = _col.query(query_embeddings=[vec], n_results=min(k, _col.count()),
-                     where=where or None)
-    hits = []
-    docs_table = db.get()
-    for i, meta in enumerate(res["metadatas"][0]):
-        fh = meta["file_hash"]
-        row = docs_table.execute(
-            "SELECT id,title,filename FROM docs WHERE file_hash=?", (fh,)
-        ).fetchone()
-        if not row:
-            continue
-        hits.append({
-            "doc_id": row["id"], "title": row["title"] or row["filename"],
-            "filename": row["filename"], "page": meta["page"],
-            "text": res["documents"][0][i],
-            "score": 1 - res["distances"][0][i],
-        })
-    return hits
+    fetch = max(k * 3, 12)
+
+    # --- 向量路 ---
+    vec_results = {}
+    if _col.count() > 0:
+        vec = providers.embed([query])[0]
+        res = _col.query(query_embeddings=[vec], n_results=min(fetch, _col.count()),
+                         where=where or None)
+        docs_table = db.get()
+        v_scores = []
+        for i, meta in enumerate(res["metadatas"][0]):
+            fh = meta["file_hash"]
+            r = docs_table.execute(
+                "SELECT id,title,filename FROM docs WHERE file_hash=?", (fh,)
+            ).fetchone()
+            if not r:
+                continue
+            cid = res["ids"][0][i]
+            sim = 1 - res["distances"][0][i]
+            vec_results[cid] = {
+                "doc_id": r["id"], "title": r["title"] or r["filename"],
+                "filename": r["filename"], "page": meta["page"],
+                "text": res["documents"][0][i], "v": sim,
+            }
+            v_scores.append(sim)
+    # 归一化向量分
+    if vec_results:
+        vmax = max(x["v"] for x in vec_results.values()) or 1.0
+        for x in vec_results.values():
+            x["vn"] = x["v"] / vmax
+
+    # --- 关键词路(BM25) ---
+    _ensure_bm25()
+    kw_results = {}
+    for cid, s, meta in bm25.INDEX.search(query, top_k=fetch):
+        kw_results[cid] = {"score": s, "meta": meta}
+    if kw_results:
+        kmax = max(x["score"] for x in kw_results.values()) or 1.0
+        for x in kw_results.values():
+            x["kn"] = x["score"] / kmax
+
+    # --- 融合 ---
+    fused: dict[str, dict] = {}
+    for cid, x in vec_results.items():
+        fused[cid] = {**x, "kw": kw_results.get(cid, {}).get("kn", 0.0)}
+    for cid, x in kw_results.items():
+        if cid not in fused:
+            m = x["meta"]
+            r = db.get().execute(
+                "SELECT id,title,filename FROM docs WHERE file_hash=?",
+                (m.get("file_hash"),),
+            ).fetchone()
+            if not r:
+                continue
+            doc_text = _col.get(ids=[cid])["documents"][0]
+            fused[cid] = {
+                "doc_id": r["id"], "title": r["title"] or r["filename"],
+                "filename": r["filename"], "page": m.get("page", 1),
+                "text": doc_text, "v": 0.0, "vn": 0.0,
+                "kw": x["kn"],
+            }
+
+    out = list(fused.values())
+    for x in out:
+        x["score"] = round(0.65 * x["vn"] + 0.35 * x["kw"], 4)
+
+    # --- 可选Rerank精排 ---
+    rerank_base = os.environ.get("RERANK_BASE_URL")
+    if rerank_base and len(out) > 1:
+        try:
+            pairs = [x["text"][:1500] for x in out]
+            rr = httpx.post(
+                rerank_base.rstrip("/") + "/rerank",
+                headers={"Authorization":
+                         f"Bearer {os.environ.get('RERANK_KEY') or config.get('ZHIPU_KEY')}"},
+                json={"model": os.environ.get("RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
+                      "query": query, "documents": pairs},
+                timeout=30,
+            )
+            rr.raise_for_status()
+            order = rr.json()["results"]
+            ranked = []
+            for item in sorted(order, key=lambda i: -i["relevance_score"])[:k]:
+                cand = out[item["index"]]
+                cand["score"] = round(item["relevance_score"], 4)
+                ranked.append(cand)
+            return ranked
+        except Exception:
+            pass  # 精排失败退回融合排序
+
+    out.sort(key=lambda x: -x["score"])
+    return out[:k]

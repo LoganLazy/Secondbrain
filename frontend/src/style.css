@@ -31,3 +31,25 @@ button {
 
 .settings-btn { margin-top: auto; }
 .sidebar .nav + .settings-btn { margin-top: auto; }
+
+.review-banner {
+  background: linear-gradient(90deg, #232c44, #1f2740);
+  border: 1px solid #3a4a6e;
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 22px;
+  font-size: 14px;
+}
+.rb-line { display: flex; align-items: center; gap: 10px; }
+.rb-picks { margin-top: 8px; color: var(--muted); font-size: 13.5px;
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rb-btn {
+  background: #2b3657;
+  color: #cfe0ff;
+  border: 1px solid #3a4a6e;
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 13.5px;
+}
+.rb-btn:hover { border-color: var(--accent); }
