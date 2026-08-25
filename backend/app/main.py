@@ -3,6 +3,7 @@ import hashlib
 import hashlib
 import json
 import threading
+import time
 import shutil
 import tempfile
 from pathlib import Path
@@ -215,6 +216,114 @@ def stats():
     docs = db.get().execute("SELECT COUNT(*) c FROM docs").fetchone()["c"]
     chunks = ingest._col.count()
     return {"docs": docs, "chunks": chunks}
+
+
+# ---------------- 设置 ----------------
+
+@app.get("/api/config")
+def get_config():
+    out = {}
+    for k in ("CHAT_BASE_URL", "CHAT_MODEL", "EMBED_BASE_URL",
+              "EMBED_MODEL", "EMBED_PROVIDER"):
+        out[k] = config.get(k)
+    for k in config.SECRET_KEYS:
+        v = config.get(k) or ""
+        out[k] = {"set": bool(v), "preview": (v[:6] + "…" + v[-4:]) if len(v) > 12 else ("已设置" if v else "")}
+    out["LABELS"] = config.LABELS
+    return out
+
+
+class ConfigIn(BaseModel):
+    patch: dict
+
+
+@app.post("/api/config")
+def set_config(c: ConfigIn):
+    allowed = {"CHAT_BASE_URL", "CHAT_MODEL", "EMBED_BASE_URL", "EMBED_MODEL",
+               "EMBED_PROVIDER", "DEEPSEEK_KEY", "ZHIPU_KEY"}
+    patch = {k: str(v).strip() for k, v in c.patch.items() if k in allowed}
+    config.save(patch)
+    return {"code": 0}
+
+
+@app.post("/api/config/test")
+def test_config(c: ConfigIn):
+    import httpx
+
+    t = c.patch.get("type")
+    try:
+        if t == "chat":
+            base = str(c.patch.get("CHAT_BASE_URL") or config.get("CHAT_BASE_URL")).rstrip("/")
+            key = c.patch.get("DEEPSEEK_KEY") or config.get("DEEPSEEK_KEY")
+            model = c.patch.get("CHAT_MODEL") or config.get("CHAT_MODEL")
+            r = httpx.post(f"{base}/chat/completions",
+                           headers={"Authorization": f"Bearer {key}"},
+                           json={"model": model, "messages": [{"role": "user", "content": "hi"}],
+                                 "max_tokens": 5}, timeout=30)
+            r.raise_for_status()
+            return {"code": 0, "msg": f"对话模型连通 ✓ ({model})"}
+        if t == "embed":
+            base = str(c.patch.get("EMBED_BASE_URL") or config.get("EMBED_BASE_URL")).rstrip("/")
+            key = c.patch.get("ZHIPU_KEY") or config.get("ZHIPU_KEY")
+            model = c.patch.get("EMBED_MODEL") or config.get("EMBED_MODEL")
+            r = httpx.post(f"{base}/embeddings",
+                           headers={"Authorization": f"Bearer {key}"},
+                           json={"model": model, "input": ["测试"]}, timeout=30)
+            r.raise_for_status()
+            dim = len(r.json()["data"][0]["embedding"])
+            return {"code": 0, "msg": f"向量模型连通 ✓ ({model}, {dim}维)"}
+        raise HTTPException(400, "type 必须是 chat 或 embed")
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"code": 1, "msg": f"连接失败: {e}"}
+
+
+# ---------------- 知识库文件夹自动导入 ----------------
+
+_importing_lock = threading.Lock()
+
+
+def scan_inbox():
+    """扫描 知识库文件夹/, 自动导入新文件; 成功移到 已导入/, 失败移到 失败/"""
+    if not _importing_lock.acquire(blocking=False):
+        return
+    try:
+        done_dir = config.INBOX_DIR / "已导入"
+        fail_dir = config.INBOX_DIR / "失败"
+        for d in (done_dir, fail_dir):
+            d.mkdir(exist_ok=True)
+        for f in sorted(config.INBOX_DIR.iterdir()):
+            if not f.is_file() or f.suffix.lower() not in (".pdf", ".docx", ".txt", ".md"):
+                continue
+            try:
+                info = ingest.ingest(f, display_name=f.name, keep_path=f)
+                shutil.move(str(f), str(done_dir / f.name))
+                log(f"[自动导入] 成功: {f.name} -> 《{info['title']}》")
+            except ValueError as e:
+                if "已存在" in str(e):
+                    shutil.move(str(f), str(done_dir / f.name))
+                    log(f"[自动导入] 跳过重复: {f.name}")
+                else:
+                    shutil.move(str(f), str(fail_dir / f.name))
+                    log(f"[自动导入] 失败: {f.name}: {e}")
+            except Exception as e:
+                shutil.move(str(f), str(fail_dir / f.name))
+                log(f"[自动导入] 失败: {f.name}: {e}")
+    finally:
+        _importing_lock.release()
+
+
+def inbox_loop():
+    while True:
+        try:
+            scan_inbox()
+        except Exception as e:
+            print("[inbox] 扫描异常:", e, flush=True)
+        time.sleep(60)
+
+
+threading.Thread(target=inbox_loop, daemon=True).start()
 
 
 # ---------------- 闪卡 ----------------

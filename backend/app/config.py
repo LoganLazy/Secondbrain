@@ -1,16 +1,42 @@
-"""配置与密钥管理: 优先读环境变量, 其次 backend/.env"""
+"""配置管理: 默认值 < 环境变量(.env) < 界面设置(settings.json), 支持运行时热更新"""
+import json
 import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
-for d in (DATA_DIR, UPLOAD_DIR):
+INBOX_DIR = BASE_DIR.parent / "知识库文件夹"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+for d in (DATA_DIR, UPLOAD_DIR, INBOX_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+DEFAULTS = {
+    # 对话模型(OpenAI兼容)
+    "CHAT_BASE_URL": "https://api.deepseek.com",
+    "CHAT_MODEL": "deepseek-chat",
+    # 向量模型(OpenAI兼容embeddings)
+    "EMBED_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+    "EMBED_MODEL": "embedding-3",
+    "EMBED_PROVIDER": "zhipu",      # zhipu=远程 | mock=离线测试
+    # 检索参数
+    "CHUNK_SIZE": 500,
+    "CHUNK_OVERLAP": 80,
+    "TOP_K": 5,
+}
+SECRET_KEYS = {"DEEPSEEK_KEY", "ZHIPU_KEY"}
+# 键名 -> 说明(用于设置界面)
+LABELS = {
+    "CHAT_BASE_URL": "对话接口地址",
+    "CHAT_MODEL": "对话模型名",
+    "EMBED_BASE_URL": "向量化接口地址",
+    "EMBED_MODEL": "向量化模型名",
+}
+
+SETTINGS: dict = {}
 
 
 def _load_env_file() -> None:
-    # 项目根 和 backend/ 都尝试加载
     for env_path in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
         if not env_path.exists():
             continue
@@ -21,21 +47,55 @@ def _load_env_file() -> None:
                 os.environ.setdefault(k.strip(), v.strip())
 
 
+def reload() -> None:
+    global SETTINGS
+    s = dict(DEFAULTS)
+    for k in list(DEFAULTS) + list(SECRET_KEYS):
+        # 环境变量(.env) > 默认值
+        if os.environ.get(k):
+            s[k] = os.environ[k]
+    for k in SECRET_KEYS:
+        s.setdefault(k, "")
+    # 界面设置 > 环境
+    file_settings = {}
+    if SETTINGS_FILE.exists():
+        try:
+            file_settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    for k, v in file_settings.items():
+        if k in SECRET_KEYS:
+            if v:
+                os.environ[k] = v
+                s[k] = v
+        else:
+            s[k] = v
+    SETTINGS = s
+
+
+def save(patch: dict) -> None:
+    file_settings = {}
+    if SETTINGS_FILE.exists():
+        try:
+            file_settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    for k, v in patch.items():
+        if k in SECRET_KEYS:
+            if v:  # 空值=不修改密钥
+                file_settings[k] = v
+                os.environ[k] = v
+        elif k in DEFAULTS:
+            file_settings[k] = v
+    SETTINGS_FILE.write_text(
+        json.dumps(file_settings, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    reload()
+
+
+def get(key: str):
+    return SETTINGS.get(key, DEFAULTS.get(key))
+
+
 _load_env_file()
-
-# ---- 对话模型(OpenAI兼容) ----
-CHAT_BASE_URL = os.environ.get("CHAT_BASE_URL", "https://api.deepseek.com")
-CHAT_KEY = os.environ.get("DEEPSEEK_KEY", "")
-CHAT_MODEL = os.environ.get("CHAT_MODEL", "deepseek-chat")
-
-# ---- 向量模型(OpenAI兼容embeddings接口) ----
-# provider: zhipu/任意兼容=云端 | mock=本地哈希向量(离线测试用)
-EMBED_PROVIDER = os.environ.get("EMBED_PROVIDER", "zhipu")
-ZHIPU_KEY = os.environ.get("ZHIPU_KEY", "")
-EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-ZHIPU_EMBED_MODEL = os.environ.get("EMBED_MODEL", os.environ.get("ZHIPU_EMBED_MODEL", "embedding-3"))
-
-# ---- 检索参数 ----
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "500"))
-CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "80"))
-TOP_K = int(os.environ.get("TOP_K", "5"))
+reload()

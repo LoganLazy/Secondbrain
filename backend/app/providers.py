@@ -31,7 +31,7 @@ def _mock_embed(texts: list[str]) -> list[list[float]]:
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    if config.EMBED_PROVIDER == "mock":
+    if config.get("EMBED_PROVIDER") == "mock":
         return _mock_embed(texts)
     return _remote_embed(texts)
 
@@ -43,16 +43,16 @@ def _remote_embed(texts: list[str]) -> list[list[float]]:
       硅基流动  EMBED_BASE_URL=https://api.siliconflow.cn/v1        EMBED_MODEL=BAAI/bge-m3 (免费)
       ollama   EMBED_BASE_URL=http://127.0.0.1:11434/v1             EMBED_MODEL=bge-m3
     """
-    base = os.environ.get("EMBED_BASE_URL", config.EMBED_BASE_URL).rstrip("/")
-    key = os.environ.get("EMBED_KEY", config.ZHIPU_KEY)
-    model = os.environ.get("EMBED_MODEL", config.ZHIPU_EMBED_MODEL)
+    base = (os.environ.get("EMBED_BASE_URL") or config.get("EMBED_BASE_URL")).rstrip("/")
+    key = os.environ.get("EMBED_KEY") or config.get("ZHIPU_KEY")
+    model = os.environ.get("EMBED_MODEL", config.get("EMBED_MODEL"))
     headers = {"Authorization": f"Bearer {key}"}
     vectors: list[list[float]] = []
     # 分批请求(多数服务单次上限64条)
     for i in range(0, len(texts), 32):
         batch = texts[i:i + 32]
         r = httpx.post(
-            f"{base}/embeddings",
+            f"{base.rstrip('/')}/embeddings",
             headers=headers,
             json={"model": model, "input": batch},
             timeout=60,

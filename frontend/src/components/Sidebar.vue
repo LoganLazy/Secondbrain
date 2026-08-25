@@ -15,6 +15,8 @@
       <button :class="{ active: tab === 'cards' }" @click="$emit('change', 'cards')">🃏 复习闪卡</button>
     </nav>
 
+    <button :class="{ active: tab === 'settings' }" class="settings-btn" @click="$emit('change', 'settings')">⚙️ 设置</button>
+
     <div class="stats">
       <div class="stat"><b>{{ stats.docs }}</b><span>文档</span></div>
       <div class="stat"><b>{{ stats.chunks }}</b><span>知识条目</span></div>

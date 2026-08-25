@@ -26,9 +26,9 @@ def call_chat(messages: list[dict], temperature: float = 0.3,
     # 推理模型会先消耗token思考, 预算不足会导致正文为空
     for budget in (max_tokens, max_tokens * 3, max_tokens * 5):
         r = httpx.post(
-            config.CHAT_BASE_URL.rstrip("/") + "/chat/completions",
-            headers={"Authorization": f"Bearer {config.CHAT_KEY}"},
-            json={"model": config.CHAT_MODEL, "messages": messages,
+            config.get("CHAT_BASE_URL").rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {config.get('DEEPSEEK_KEY')}"},
+            json={"model": config.get("CHAT_MODEL"), "messages": messages,
                   "temperature": temperature, "max_tokens": budget},
             timeout=180,
         )
@@ -124,12 +124,30 @@ def get_doc(doc_id: int):
 
 
 def doc_pages(doc_id: int) -> list[dict]:
-    """读取原文并返回按页文本(阅读器用)"""
+    """读取原文并返回按页文本(阅读器用); 自动剔除跨页重复的水印行"""
     row = get_doc(doc_id)
     fp = row["file_path"]
     if not fp or not Path(fp).exists():
         raise ValueError("原文文件已丢失，请重新上传")
     pages = parser.parse(Path(fp))
+
+    if len(pages) >= 4:  # 页数太少不做统计过滤
+        import re
+        from collections import Counter
+
+        norm = lambda s: re.sub(r"\s+", "", s)[:60]
+        lines = [norm(ln) for t, _ in pages for ln in t.split("\n") if ln.strip()]
+        counter = Counter(lines)
+        threshold = max(4, int(len(pages) * 0.35))
+        noisy = {ln for ln, c in counter.items() if c >= threshold}
+        if noisy:
+            cleaned = []
+            for t, p in pages:
+                kept = [ln for ln in t.split("\n")
+                        if not (ln.strip() and norm(ln) in noisy)]
+                cleaned.append(("\n".join(kept).strip(), p))
+            pages = cleaned
+
     return [{"page": p, "text": t} for t, p in pages]
 
 
@@ -143,7 +161,7 @@ def delete_doc(doc_id: int):
 
 
 def search(query: str, k: int | None = None, where: dict | None = None) -> list[dict]:
-    k = k or config.TOP_K
+    k = k or config.get("TOP_K")
     if _col.count() == 0:
         return []
     vec = providers.embed([query])[0]

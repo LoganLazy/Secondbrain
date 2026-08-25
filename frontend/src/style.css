@@ -28,3 +28,6 @@ button {
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #333a46; border-radius: 4px; }
+
+.settings-btn { margin-top: auto; }
+.sidebar .nav + .settings-btn { margin-top: auto; }

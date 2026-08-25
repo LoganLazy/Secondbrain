@@ -6,21 +6,35 @@
         <button class="back" @click="$emit('close')">← 返回</button>
         <span class="doc-title">{{ doc.title || doc.filename }}</span>
       </div>
-      <div class="pages" ref="pagesBox">
-        <div v-if="loadErr" class="load-err">{{ loadErr }}</div>
-        <div v-for="p in pages" :key="p.page" class="page">
-          <div class="page-no">第 {{ p.page }} 页</div>
-          <div
-            class="page-text"
-            @mouseup="onSelect(p)"
-            @touchend="onSelect(p)"
-          >{{ p.text }}</div>
-        </div>
+
+      <!-- 工具栏 -->
+      <div class="tools">
+        <button @click="prevPage" :disabled="idx <= 0">◀ 上一页</button>
+        <span class="page-ind">
+          第 <input class="jump" v-model.number="jumpTo" @keydown.enter="goPage(jumpTo)" /> / {{ pages.length }} 页
+        </span>
+        <button @click="nextPage" :disabled="idx >= pages.length - 1">下一页 ▶</button>
+        <span class="sep"></span>
+        <button @click="fontSize = Math.max(13, fontSize - 1)" title="缩小字体">A-</button>
+        <button @click="fontSize = Math.min(26, fontSize + 1)" title="放大字体">A+</button>
       </div>
-      <div v-if="selection" class="sel-float" :style="{ top: floatY + 'px' }">
-        <button @click="askSelected('解释这段话')">💬 解释这段</button>
-        <button @click="askSelected('这段话的重点是什么？')">📌 划重点</button>
-        <button @click="askSelected('翻译成中文(如果是外文)或用大白话再讲一遍')">🔁 换个说法</button>
+
+      <div class="pages" ref="pagesBox" tabindex="0" @keydown="onKey">
+        <div v-if="loadErr" class="load-err">{{ loadErr }}</div>
+        <div v-else-if="pages.length" class="page"
+             :style="{ fontSize: fontSize + 'px' }"
+             @mouseup="onSelect" @touchend="onSelect">
+          <div class="page-no">{{ pages[idx].page }}</div>
+          <div class="page-text">{{ pages[idx].text }}</div>
+        </div>
+        <div v-else class="load-err">加载中…</div>
+
+        <!-- 划词浮动按钮 -->
+        <div v-if="selection" class="sel-float">
+          <button @click="askSelected('解释这段话')">💬 解释这段</button>
+          <button @click="askSelected('这段话的重点是什么？')">📌 划重点</button>
+          <button @click="askSelected('翻译成中文(如果是外文)或用大白话再讲一遍')">🔁 换个说法</button>
+        </div>
       </div>
     </div>
 
@@ -37,8 +51,7 @@
         </div>
         <div v-for="(m, i) in msgs" :key="i" :class="['m', m.role]">
           <div class="m-content">{{ m.content }}</div>
-          <button v-if="m.role === 'assistant'" class="copy"
-                  @click="copy(m)">复制</button>
+          <button v-if="m.role === 'assistant'" class="copy" @click="copy(m)">复制</button>
         </div>
         <div v-if="busy" class="m assistant"><div class="m-content thinking">思考中…</div></div>
       </div>
@@ -51,8 +64,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from "vue"
-import { api } from "../api"
+import { ref, nextTick, onMounted, onUnmounted } from "vue"
 
 const props = defineProps({ doc: Object })
 defineEmits(["close"])
@@ -62,50 +74,58 @@ const msgs = ref([])
 const busy = ref(false)
 const selection = ref("")
 const selPage = ref(null)
-const floatY = ref(0)
 const draft = ref("")
 const aiBox = ref(null)
-const pagesBox = ref(null)
+const idx = ref(0)
+const jumpTo = ref(1)
+const fontSize = ref(16)
 const loadErr = ref("")
 
 const quicks = [
   { label: "📝 总结全文", question: "请总结这份文档的核心内容", scope: "all" },
-  { label: "💡 解释本页", question: "用大白话解释这一页的内容", scope: "page", needPage: true },
-  { label: "📌 提取重点", question: "提取这一页的关键要点，分条列出", scope: "page", needPage: true },
-  { page: true, label: "📓 生成笔记", question: "把这一页整理成结构化学习笔记(markdown要点式)", scope: "page", needPage: true },
-  { label: "❓ 出3道题", question: "基于这一页内容出3道自测题并附答案", scope: "page", needPage: true }
+  { label: "💡 解释本页", question: "用大白话解释这一页的内容", scope: "page" },
+  { label: "📌 提取重点", question: "提取这一页的关键要点，分条列出", scope: "page" },
+  { label: "📓 生成笔记", question: "把这一页整理成结构化学习笔记(markdown要点式)", scope: "page" },
+  { label: "❓ 出3道题", question: "基于这一页内容出3道自测题并附答案", scope: "page" }
 ]
 
-api.docs().then(async () => {
+async function load() {
   try {
     const res = await fetch(`/api/docs/${props.doc.id}/content`)
     const r = await res.json()
     if (!res.ok) throw new Error(r.detail || "加载失败")
     pages.value = r.pages
+    jumpTo.value = pages.value[0]?.page ?? 1
   } catch (e) {
     loadErr.value = "原文加载失败: " + e.message + "（可能已被删除或丢失，请重新上传）"
   }
-})
-
-function currentPage() {
-  // 取滚动位置最接近顶部的页
-  const box = pagesBox.value
-  if (!box) return pages.value[0]?.page ?? 1
-  let best = pages.value[0]?.page ?? 1
-  let bestDist = Infinity
-  for (const el of box.querySelectorAll(".page")) {
-    const d = Math.abs(el.getBoundingClientRect().top - box.getBoundingClientRect().top)
-    if (d < bestDist) { bestDist = d; best = parseInt(el.querySelector(".page-no").textContent.replace(/\D/g, "")) }
-  }
-  return best
 }
+load()
 
-function onSelect(p) {
+function goPage(n) {
+  if (!n || n < 1 || n > pages.value.length) return
+  const target = pages.value.findIndex((p) => p.page === n)
+  if (target >= 0) {
+    idx.value = target
+    selection.value = ""
+    aiBox.value?.scrollTo?.(0, 0)
+  }
+}
+function prevPage() { goPage(pages.value[Math.max(0, idx.value - 1)].page) }
+function nextPage() { goPage(pages.value[Math.min(pages.value.length - 1, idx.value + 1)].page) }
+
+function onKey(e) {
+  if (e.key === "ArrowLeft") prevPage()
+  else if (e.key === "ArrowRight") nextPage()
+}
+onMounted(() => window.addEventListener("keydown", onKey))
+onUnmounted(() => window.removeEventListener("keydown", onKey))
+
+function onSelect(e) {
   const s = window.getSelection().toString().trim()
   if (s.length > 1) {
     selection.value = s.slice(0, 2000)
-    selPage.value = p.page
-    floatY.value = Math.min(window.innerHeight / 2, 300)
+    selPage.value = pages.value[idx.value]?.page ?? null
   } else {
     selection.value = ""
   }
@@ -114,7 +134,8 @@ function onSelect(p) {
 async function run(question, passage, page) {
   if (busy.value) return
   busy.value = true
-  msgs.value.push({ role: "user", content: passage ? `【选中的内容】${passage.slice(0, 120)}…\n${question}` : question })
+  msgs.value.push({ role: "user",
+    content: passage ? `【选中的内容】${passage.slice(0, 120)}…\n${question}` : question })
   scroll()
   try {
     const r = await fetch("/api/assist", {
@@ -143,31 +164,25 @@ function askSelected(q) {
 }
 
 function runQuick(a) {
-  const page = currentPage()
-  const pageNo = a.needPage ? page : null
+  const page = pages.value[idx.value]?.page ?? 1
   const passage = a.scope === "all"
-    ? pages.value.map((p) => p.text).join("\n")
-    : (pages.value.find((p) => p.page === page)?.text || "")
+    ? pages.value.map((p) => p.text).join("\n").slice(0, 12000)
+    : (pages.value[idx.value]?.text || "")
   const q = a.scope === "all" ? a.question : `${a.question}（当前是第${page}页）`
-  run(q, passage, pageNo)
+  run(q, passage, a.scope === "all" ? null : page)
 }
 
 function askDraft() {
   const q = draft.value.trim()
   if (!q) return
   draft.value = ""
-  const page = currentPage()
-  const passage = pages.value.find((p) => p.page === page)?.text || ""
+  const page = pages.value[idx.value]?.page ?? 1
+  const passage = pages.value[idx.value]?.text || ""
   run(q, passage, page)
 }
 
-function copy(m) {
-  navigator.clipboard.writeText(m.content)
-}
-
-function scroll() {
-  nextTick(() => aiBox.value && (aiBox.value.scrollTop = aiBox.value.scrollHeight))
-}
+function copy(m) { navigator.clipboard.writeText(m.content) }
+function scroll() { nextTick(() => aiBox.value && (aiBox.value.scrollTop = aiBox.value.scrollHeight)) }
 </script>
 
 <style scoped>
@@ -182,27 +197,52 @@ function scroll() {
 .back { background: var(--panel2); color: var(--text); border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
 .doc-title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.pages { flex: 1; overflow-y: auto; padding: 22px 30px; position: relative; }
-.page {
-  background: #fff;
-  color: #222;
-  border-radius: 10px;
-  padding: 26px 30px;
-  margin-bottom: 20px;
-  line-height: 1.9;
-  white-space: pre-wrap;
-  font-size: 15px;
-  cursor: text;
+.tools {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
 }
-.page-no { color: #aaa; font-size: 12px; margin-bottom: 8px; user-select: none; }
+.tools button {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 13px; cursor: pointer; font-size: 13.5px;
+}
+.tools button:hover:not(:disabled) { border-color: var(--accent); }
+.tools button:disabled { opacity: .35; cursor: default; }
+.page-ind { color: var(--muted); font-size: 13.5px; display: flex; align-items: center; gap: 5px; }
+.jump {
+  width: 52px; text-align: center;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px; outline: none;
+}
+.sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+
+.pages { flex: 1; overflow-y: auto; padding: 24px 30px; position: relative; outline: none; }
+.page {
+  max-width: 720px;
+  margin: 0 auto;
+  background: #fdfbf7;
+  color: #2a2a2a;
+  border-radius: 12px;
+  box-shadow: 0 3px 14px rgba(0,0,0,.25);
+  padding: 44px 48px;
+  line-height: 2.0;
+  white-space: pre-wrap;
+  min-height: 60vh;
+}
+.page-no { color: #b9b2a5; font-size: 12px; margin-bottom: 14px; user-select: none; text-align: center; }
+
 .load-err {
   background: #3a2226; color: #ff9b9b;
   border-radius: 10px; padding: 16px 20px; font-size: 14px;
 }
 
 .sel-float {
-  position: fixed;
-  right: 46%;
+  position: sticky;
+  bottom: 14px;
+  margin: 0 auto;
+  width: fit-content;
   z-index: 20;
   background: var(--panel);
   border: 1px solid var(--accent);
@@ -210,7 +250,7 @@ function scroll() {
   padding: 6px;
   display: flex;
   gap: 6px;
-  box-shadow: 0 6px 18px rgba(0,0,0,.4);
+  box-shadow: 0 6px 18px rgba(0,0,0,.45);
 }
 .sel-float button {
   background: var(--panel2); color: var(--text);

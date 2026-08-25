@@ -53,7 +53,7 @@ def _parse_docx(path: Path) -> list[tuple[str, int]]:
 
 def chunk_text(pages: list[tuple[str, int]]) -> list[dict]:
     """段落聚合+滑窗切块. 返回 [{text, page}]"""
-    size, overlap = config.CHUNK_SIZE, config.CHUNK_OVERLAP
+    size, overlap = int(config.get("CHUNK_SIZE")), int(config.get("CHUNK_OVERLAP"))
     chunks: list[dict] = []
     buf, buf_page = "", pages[0][1] if pages else 1
 
