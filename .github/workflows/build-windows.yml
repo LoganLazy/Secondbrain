@@ -1,0 +1,71 @@
+name: Build Windows
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm config set registry https://registry.npmmirror.com
+          npm ci || npm install --no-audit --no-fund
+          npm run build
+
+      - name: Install backend deps
+        working-directory: backend
+        run: |
+          pip install -r requirements.txt
+          pip install pywebview pyinstaller
+
+      - name: Build exe with PyInstaller
+        working-directory: backend
+        run: >
+          pyinstaller --onefile --name MemoryAI
+          --paths .
+          --add-data "../frontend/dist;frontend_dist"
+          --hidden-import uvicorn.logging
+          --hidden-import uvicorn.loops.auto
+          --hidden-import uvicorn.protocols.http.auto
+          --hidden-import uvicorn.protocols.websockets.auto
+          --hidden-import uvicorn.lifespan.on
+          --collect-all chromadb
+          --collect-all tokenizers
+          --collect-all onnxruntime
+          --collect-all rapidocr_onnxruntime
+          --collect-all trafilatura
+          --hidden-import app.main
+          --hidden-import app.rag
+          --hidden-import app.cards
+          desktop.py
+
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item backend/dist/MemoryAI.exe package/
+          New-Item -ItemType Directory -Force -Path "package/知识库文件夹/默认知识库" | Out-Null
+          Copy-Item README.md package/
+          Compress-Archive -Path package/* -DestinationPath MemoryAI-Windows-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MemoryAI-Windows-x64
+          path: MemoryAI-Windows-x64.zip

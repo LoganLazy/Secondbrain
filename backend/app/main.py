@@ -731,7 +731,10 @@ def fc_stats(request: Request):
     return cards_mod.stats(KB(request))
 
 
-# 生产模式挂载前端构建产物(存在才生效)
-_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+# 生产模式挂载前端构建产物
+if getattr(sys, "frozen", False):
+    _dist = Path(sys._MEIPASS) / "frontend_dist"
+else:
+    _dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _dist.exists():
     app.mount("/", StaticFiles(directory=str(_dist), html=True), name="fe")

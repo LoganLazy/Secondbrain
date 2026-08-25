@@ -3,7 +3,12 @@ import json
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+import sys
+
+if getattr(sys, "frozen", False):  # PyInstaller打包后: 数据放在exe旁边, 用户可见可备份
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 INBOX_DIR = BASE_DIR.parent / "知识库文件夹"
