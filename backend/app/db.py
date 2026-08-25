@@ -41,6 +41,8 @@ def get() -> sqlite3.Connection:
             _conn.execute("ALTER TABLE docs ADD COLUMN file_path TEXT")
         if "kb_id" not in cols:
             _conn.execute("ALTER TABLE docs ADD COLUMN kb_id TEXT DEFAULT 'default'")
+        if "source_url" not in cols:
+            _conn.execute("ALTER TABLE docs ADD COLUMN source_url TEXT")
         # 唯一约束从 file_hash 改为 (file_hash, kb_id): 允许同文件存入多个知识库
         need_rebuild = False
         for idx in _conn.execute("PRAGMA index_list(docs)").fetchall():

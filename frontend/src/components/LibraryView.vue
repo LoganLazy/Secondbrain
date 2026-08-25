@@ -5,11 +5,25 @@
         {{ busy ? "处理中…" : "＋ 上传文档 (可多选)" }}
         <input type="file" accept=".pdf,.docx,.txt,.md" multiple hidden @change="onFile" />
       </label>
+      <button class="webbtn" @click="linkModal = true">🔗 导入网页</button>
       <input v-model="q" class="search" placeholder="🔍 语义搜索：用大白话描述你要找的东西，Enter 搜索"
              @keydown.enter="doSearch" />
     </div>
 
     <div v-if="err" class="err">{{ err }}</div>
+
+    <div v-if="linkModal" class="mask">
+      <div class="card modal">
+        <h4 style="margin:0 0 10px">🔗 导入网页</h4>
+        <textarea v-model="linksText" rows="5"
+          placeholder="每行一个链接，如：&#10;https://某博客.com/文章&#10;https://mp.weixin.qq.com/s/xxx"></textarea>
+        <div class="modal-btns">
+          <button class="mbtn cancel" @click="linkModal = false">取消</button>
+          <button class="mbtn ok" :disabled="importing || !linksText.trim()"
+                  @click="doImportLinks">{{ importing ? "抓取中…" : "开始导入" }}</button>
+        </div>
+      </div>
+    </div>
     <div v-if="results.length" class="up-results card">
       <div v-for="(r, i) in results" :key="i" class="up-line">
         {{ r.ok ? "✅" : "❌" }} {{ r.file }}
@@ -64,6 +78,30 @@ const hits = ref(null)
 const busy = ref(false)
 const err = ref("")
 const results = ref([])
+const linkModal = ref(false)
+const linksText = ref("")
+const importing = ref(false)
+
+async function doImportLinks() {
+  const urls = linksText.value.split("\n").map((x) => x.trim()).filter(Boolean)
+  if (!urls.length) return
+  importing.value = true
+  try {
+    const r = await fetch("/api/import/links", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls })
+    })
+    const d = await r.json()
+    results.value = d.results || []
+    linkModal.value = false
+    load()
+    window.dispatchEvent(new CustomEvent("kb-updated"))
+  } catch (e) {
+    err.value = "导入失败: " + e.message
+  }
+  importing.value = false
+}
 
 onMounted(load)
 async function load() {
@@ -109,6 +147,29 @@ function fmtTime(t) {
 
 <style scoped>
 .lib { padding: 22px 30px; max-width: 980px; margin: 0 auto; }
+
+.webbtn {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 13px 18px; cursor: pointer; font-size: 14px;
+}
+.webbtn:hover { border-color: var(--accent); }
+
+.mask { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+        z-index: 30; display: flex; align-items: center; justify-content: center; }
+.modal { width: 86%; max-width: 560px; display: flex; flex-direction: column; gap: 12px; }
+.modal textarea {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px; font-size: 14px; outline: none; resize: vertical;
+}
+.modal textarea:focus { border-color: var(--accent); }
+.modal-btns { display: flex; gap: 12px; }
+.mbtn { flex: 1; padding: 11px; border-radius: 10px; border: none;
+        font-size: 15px; cursor: pointer; }
+.mbtn.cancel { background: #3a3f4a; color: var(--text); }
+.mbtn.ok { background: var(--accent); color: #fff; }
+.mbtn.ok:disabled { opacity: .5; }
 
 .toolbar { display: flex; gap: 14px; margin-bottom: 20px; }
 .upbtn {

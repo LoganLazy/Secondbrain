@@ -73,3 +73,14 @@ button {
 }
 .kb-add:hover { border-color: var(--accent); }
 .kb-del:hover { border-color: #e5484d; }
+
+.src-link {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 13px;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 10px;
+}
+.src-link:hover { border-color: var(--accent); }

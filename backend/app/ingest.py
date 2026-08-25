@@ -158,7 +158,7 @@ def ingest(path: Path, display_name: str | None = None,
 
 def get_doc(doc_id: int):
     row = db.get().execute(
-        "SELECT id,filename,title,file_path FROM docs WHERE id=?", (doc_id,)
+        "SELECT id,filename,title,file_path,source_url FROM docs WHERE id=?", (doc_id,)
     ).fetchone()
     if not row:
         raise ValueError("文档不存在")

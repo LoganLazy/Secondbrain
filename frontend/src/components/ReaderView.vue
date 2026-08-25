@@ -5,6 +5,7 @@
       <div class="doc-head">
         <button class="back" @click="$emit('close')">← 返回</button>
         <span class="doc-title">{{ doc.title || doc.filename }}</span>
+        <a v-if="sourceUrl" class="src-link" :href="sourceUrl" target="_blank">🌐 原网页</a>
       </div>
 
       <!-- 工具栏 -->
@@ -80,6 +81,7 @@ const idx = ref(0)
 const jumpTo = ref(1)
 const fontSize = ref(16)
 const loadErr = ref("")
+const sourceUrl = ref("")
 
 const quicks = [
   { label: "📝 总结全文", question: "请总结这份文档的核心内容", scope: "all" },
@@ -95,6 +97,7 @@ async function load() {
     const r = await res.json()
     if (!res.ok) throw new Error(r.detail || "加载失败")
     pages.value = r.pages
+    sourceUrl.value = r.source_url || ""
     jumpTo.value = pages.value[0]?.page ?? 1
   } catch (e) {
     loadErr.value = "原文加载失败: " + e.message + "（可能已被删除或丢失，请重新上传）"

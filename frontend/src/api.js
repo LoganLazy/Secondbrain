@@ -30,6 +30,7 @@ export const api = {
   fcDue: () => jfetch("/api/flashcards/due"),
   fcStats: () => jfetch("/api/flashcards/stats"),
   delCard: (id) => jfetch(`/api/flashcards/${id}`, { method: "DELETE" }),
+  importLinks: (urls) => jfetch("/api/import/links", { method: "POST", body: JSON.stringify({ urls }) }),
 
   async uploadFiles(files) {
     const fd = new FormData()

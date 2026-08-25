@@ -1,6 +1,8 @@
 """FastAPI 入口"""
 import hashlib
+import re
 import hashlib
+import re
 import json
 import threading
 import time
@@ -79,7 +81,10 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
 @app.get("/api/docs/{doc_id}/content")
 def doc_content(doc_id: int):
     try:
-        return {"code": 0, "pages": ingest.doc_pages(doc_id)}
+        row = db.get().execute(
+            "SELECT source_url FROM docs WHERE id=?", (doc_id,)).fetchone()
+        return {"code": 0, "pages": ingest.doc_pages(doc_id),
+                "source_url": row["source_url"] if row else None}
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -114,7 +119,7 @@ def assist(a: AssistIn):
 def list_docs(request: Request):
     rows = db.get().execute(
         "SELECT id,filename,title,category,tags,summary,chunks,created,"
-        "(file_path IS NOT NULL AND file_path!='') AS has_file"
+        "(file_path IS NOT NULL AND file_path!='') AS has_file, source_url"
         " FROM docs WHERE kb_id=? ORDER BY id DESC", (KB(request),)
     ).fetchall()
     return [
@@ -361,6 +366,74 @@ def delete_kb(kb_id: str):
     db.get().execute("DELETE FROM kbs WHERE id=?", (kb_id,))
     db.get().commit()
     return {"code": 0}
+
+
+# ---------------- 网页链接导入 ----------------
+
+def _extract_web(url: str) -> tuple[str, str]:
+    """抓取网页并提取正文, 返回 (标题, 正文文本)"""
+    import trafilatura
+    import httpx as _hx
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                             "Chrome/120.0 Safari/537.36"}
+    r = _hx.get(url, headers=headers, timeout=25, follow_redirects=True)
+    r.raise_for_status()
+    html = r.text
+    if len(html) > 3_000_000:
+        raise ValueError("页面过大")
+    text = trafilatura.extract(html, include_comments=False,
+                               favor_recall=True, url=url)
+    if not text or len(text.strip()) < 80:
+        raise ValueError("提取不到正文(可能是登录墙、JS动态页或非文章类页面)")
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+    title = (m.group(1).strip() if m else "")[:80]
+    title = re.sub(r"\s*[-_|·].*$", "", title) or url
+    return title, text.strip()
+
+
+class LinksIn(BaseModel):
+    urls: list[str]
+
+
+@app.post("/api/import/links")
+def import_links(request: Request, body: LinksIn):
+    kb = KB(request)
+    results = []
+    for url in body.urls[:10]:
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            if url:
+                results.append({"url": url, "ok": False, "msg": "不是有效链接"})
+            continue
+        try:
+            # 同库URL去重
+            dup = db.get().execute(
+                "SELECT 1 FROM docs WHERE source_url=? AND kb_id=?",
+                (url, kb)).fetchone()
+            if dup:
+                results.append({"url": url, "ok": False, "msg": "已导入过"})
+                continue
+            title, text = _extract_web(url)
+            content = (f"# {title}\n\n> 来源: {url}\n"
+                       f"> 抓取时间: {time.strftime('%Y-%m-%d %H:%M')}\n\n{text}")
+            safe = re.sub(r"[^\w\u4e00-\u9fff-]", "_", title)[:40] or "web"
+            dest = config.UPLOAD_DIR / f"web_{hashlib.md5(url.encode()).hexdigest()[:8]}_{safe}.md"
+            dest.write_text(content, encoding="utf-8")
+            info = ingest.ingest(dest, display_name=title, keep_path=dest, kb_id=kb)
+            db.get().execute("UPDATE docs SET source_url=? WHERE id=?",
+                             (url, info["id"]))
+            db.get().commit()
+            results.append({"url": url, "ok": True, "title": info["title"],
+                            "id": info["id"], "chars": len(text)})
+        except Exception as e:
+            msg = str(e)
+            if "404" in msg: msg = "页面不存在(404)"
+            elif "403" in msg or "521" in msg or "520" in msg: msg = "站点反爬拒绝，无法抓取"
+            elif "timed out" in msg.lower(): msg = "抓取超时"
+            results.append({"url": url, "ok": False, "msg": msg})
+    return {"code": 0, "results": results}
 
 
 # ---------------- 知识库文件夹自动导入 ----------------
