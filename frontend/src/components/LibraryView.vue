@@ -2,11 +2,11 @@
   <div class="lib">
     <div class="toolbar">
       <label class="upbtn" :class="{ busy }">
-        {{ busy ? "处理中…" : "＋ 上传文档/图片 (可多选)" }}
+        {{ busy ? L("uploading") : L("upload_btn") }}
         <input type="file" accept=".pdf,.docx,.txt,.md,.jpg,.png,.webp" multiple hidden @change="onFile" />
       </label>
-      <button class="webbtn" @click="linkModal = true">🔗 导入网页</button>
-      <input v-model="q" class="search" placeholder="🔍 语义搜索：用大白话描述你要找的东西，Enter 搜索"
+      <button class="webbtn" @click="linkModal = true">{{ L("web_import") }}</button>
+      <input v-model="q" class="search" :placeholder="L('search_ph')"
              @keydown.enter="doSearch" />
     </div>
 
@@ -14,13 +14,13 @@
 
     <div v-if="linkModal" class="mask">
       <div class="card modal">
-        <h4 style="margin:0 0 10px">🔗 导入网页</h4>
+        <h4 style="margin:0 0 10px">{{ L("link_modal_h") }}</h4>
         <textarea v-model="linksText" rows="5"
           placeholder="每行一个链接，如：&#10;https://某博客.com/文章&#10;https://mp.weixin.qq.com/s/xxx"></textarea>
         <div class="modal-btns">
-          <button class="mbtn cancel" @click="linkModal = false">取消</button>
+          <button class="mbtn cancel" @click="linkModal = false">{{ L("cancel") }}</button>
           <button class="mbtn ok" :disabled="importing || !linksText.trim()"
-                  @click="doImportLinks">{{ importing ? "抓取中…" : "开始导入" }}</button>
+                  @click="doImportLinks">{{ importing ? L("importing") : L("start_import") }}</button>
         </div>
       </div>
     </div>
@@ -34,22 +34,22 @@
     </div>
 
     <div v-if="hits !== null" class="hits">
-      <h4>搜索结果（{{ hits.length }}）<button class="linkbtn" @click="clearSearch">返回列表</button></h4>
+      <h4>搜索结果（{{ hits.length }}）<button class="linkbtn" @click="clearSearch">{{ L("back_list") }}</button></h4>
       <div v-for="(h, i) in hits" :key="i" class="hit card" style="cursor:pointer"
            @click="$emit('openDoc', h)">
         <div class="hit-head">
-          📄 {{ h.title }} · 第{{ h.page }}页
-          <span class="score">{{ Math.round(h.score * 100) }}% 匹配</span>
+          📄 {{ h.title }} · {{ L("page_n") }}{{ h.page }}
+          <span class="score">{{ Math.round(h.score * 100) }}% {{ L("matches") }}</span>
           <button class="dbg-btn" @click.stop="h._dbg = !h._dbg">🔬</button>
         </div>
         <div v-if="h._dbg" class="dbg">
-          语义分 {{ h.semantic?.toFixed?.(3) ?? h.semantic }} ·
-          关键词分 {{ h.keyword?.toFixed?.(3) ?? h.keyword }} ·
-          融合 = 语义×0.65 + 关键词×0.35
+          {{ L("dbg_sem") }} {{ h.semantic?.toFixed?.(3) ?? "-" }} ·
+          {{ L("dbg_kw") }} {{ h.keyword?.toFixed?.(3) ?? "-" }} ·
+          {{ L("dbg_fuse") }}
         </div>
         <p>{{ h.text.slice(0, 260) }}…</p>
       </div>
-      <div v-if="!hits.length" class="none">没找到相关内容</div>
+      <div v-if="!hits.length" class="none">{{ L("none_found") }}</div>
     </div>
 
     <div v-else class="docs">
@@ -67,7 +67,7 @@
         </div>
         <button class="del" title="删除" @click="del(d)">🗑</button>
       </div>
-      <div v-if="!docs.length && !busy" class="none">知识库还是空的，上传第一份文档吧</div>
+      <div v-if="!docs.length && !busy" class="none">{{ L("kb_empty") }}</div>
     </div>
   </div>
 </template>
@@ -75,7 +75,10 @@
 <script setup>
 import { ref, onMounted } from "vue"
 import { api } from "../api"
+import { t as _t, lang as _lang } from "../i18n"
 
+const L = (k) => _t(k)
+const langv = _lang
 defineEmits(["openDoc", "uploaded"])
 
 const docs = ref([])
@@ -104,7 +107,7 @@ async function doImportLinks() {
     load()
     window.dispatchEvent(new CustomEvent("kb-updated"))
   } catch (e) {
-    err.value = "导入失败: " + e.message
+    err.value = L("import_fail") + e.message
   }
   importing.value = false
 }
@@ -140,7 +143,7 @@ async function doSearch() {
 function clearSearch() { hits.value = null; q.value = "" }
 
 async function del(d) {
-  if (!confirm(`删除《${d.title || d.filename}》及其全部知识条目？`)) return
+  if (!confirm(langv === "zh" ? `删除《${d.title || d.filename}》及其全部知识条目？` : `Delete "${d.title || d.filename}" and all its chunks?`)) return
   await api.delDoc(d.id)
   load()
 }

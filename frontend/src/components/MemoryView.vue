@@ -1,29 +1,32 @@
 <template>
   <div class="mem">
     <div class="head">
-      <h3>🧷 长期记忆</h3>
-      <p>告诉 AI 需要长期记住的事（设备、偏好、背景…），问答时会自动参考。</p>
+      <h3>{{ L("mem_h") }}</h3>
+      <p>{{ L("mem_p") }}</p>
     </div>
     <div class="inputbar">
-      <input v-model="draft" placeholder="比如：我有一台16核16G的服务器，跑Docker和NAS" @keydown.enter="add" />
-      <button @click="add">记住它</button>
+      <input v-model="draft" :placeholder="L('mem_ph')" @keydown.enter="add" />
+      <button @click="add">{{ L("mem_add") }}</button>
     </div>
 
     <div v-for="m in list" :key="m.id" class="card item">
       <span>{{ m.content }}</span>
       <button class="del" @click="del(m.id)">🗑</button>
     </div>
-    <div v-if="!list.length" class="none">还没有记忆，添加第一条吧</div>
+    <div v-if="!list.length" class="none">{{ L("mem_empty") }}</div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from "vue"
+import { t as _t, lang as _lang } from "../i18n"
 import { api } from "../api"
 
 const list = ref([])
 const draft = ref("")
 
+const L = (k) => _t(k)
+const langv = _lang
 onMounted(load)
 async function load() { list.value = await api.memoryList() }
 async function add() {

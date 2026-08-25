@@ -1,5 +1,5 @@
 {
-  "name": "memory-ai-desktop",
+  "name": "secondbrain-desktop",
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
@@ -7,8 +7,8 @@
     "dist": "electron-builder --win dir"
   },
   "build": {
-    "appId": "com.loganlazy.memoryai",
-    "productName": "MemoryAI",
+    "appId": "com.loganlazy.secondbrain",
+    "productName": "SecondBrain",
     "directories": {
       "output": "out"
     },

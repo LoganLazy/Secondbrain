@@ -3,22 +3,22 @@
     <!-- 左侧: 原文 -->
     <div class="doc-pane">
       <div class="doc-head">
-        <button class="back" @click="$emit('close')">← 返回</button>
+        <button class="back" @click="$emit('close')">← {{ langv === "zh" ? "返回" : "Back" }}</button>
         <span class="doc-title">{{ doc.title || doc.filename }}</span>
         <a v-if="sourceUrl" class="src-link" :href="sourceUrl" target="_blank">🌐 原网页</a>
       </div>
 
       <!-- 工具栏 -->
       <div class="tools">
-        <button @click="prevPage" :disabled="idx <= 0">◀ 上一页</button>
+        <button @click="prevPage" :disabled="idx <= 0">>{{ L("prev") }}</button>
         <span class="page-ind">
-          第 <input class="jump" v-model.number="jumpTo" @keydown.enter="goPage(jumpTo)" /> / {{ pages.length }} 页
+          <span class="page-ind-txt">{{ L("page_n") }}</span> <input class="jump" v-model.number="jumpTo" @keydown.enter="goPage(jumpTo)" /> / {{ pages.length }}
         </span>
-        <button @click="nextPage" :disabled="idx >= pages.length - 1">下一页 ▶</button>
+        <button @click="nextPage" :disabled="idx >= pages.length - 1">>{{ L("next") }}</button>
         <template v-if="kind === 'pdf'">
           <span class="sep"></span>
-          <button :class="{ on: viewMode === 'text' }" @click="viewMode = 'text'">文字</button>
-          <button :class="{ on: viewMode === 'original' }" @click="viewMode = 'original'; renderOriginal()">原版</button>
+          <button :class="{ on: viewMode === 'text' }" @click="viewMode = 'text'">{{ L("view_text") }}</button>
+          <button :class="{ on: viewMode === 'original' }" @click="viewMode = 'original'; renderOriginal()">{{ L("view_original") }}</button>
         </template>
         <span class="sep"></span>
         <button @click="fontSize = Math.max(13, fontSize - 1)" title="缩小字体">A-</button>
@@ -43,13 +43,13 @@
           <div class="page-no">{{ pages[idx].page }}</div>
           <div class="page-text">{{ pages[idx].text }}</div>
         </div>
-        <div v-else class="load-err">加载中…</div>
+        <div v-else class="load-err">{{ L("loading") }}</div>
 
         <!-- 划词浮动按钮 -->
         <div v-if="selection" class="sel-float">
-          <button @click="askSelected('解释这段话')">💬 解释这段</button>
-          <button @click="askSelected('这段话的重点是什么？')">📌 划重点</button>
-          <button @click="askSelected('翻译成中文(如果是外文)或用大白话再讲一遍')">🔁 换个说法</button>
+          <button @click="askSelected(langv === 'zh' ? '解释这段话' : 'Explain this passage')">💬 {{ langv === "zh" ? "解释这段" : "Explain" }}</button>
+          <button @click="askSelected(langv === 'zh' ? '这段话的重点是什么？' : 'What are the key points here?')">📌 {{ langv === "zh" ? "划重点" : "Points" }}</button>
+          <button @click="askSelected(langv === 'zh' ? '翻译成中文(如果是外文)或用大白话再讲一遍' : 'Translate to English if foreign, or rephrase simply')">🔁 {{ langv === "zh" ? "换个说法" : "Rephrase" }}</button>
         </div>
       </div>
     </div>
@@ -63,17 +63,17 @@
       </div>
       <div class="ai-msgs" ref="aiBox">
         <div v-if="!msgs.length" class="ai-empty">
-          选中左侧文字提问，或点上面的快捷操作
+          {{ L("ai_empty") }}
         </div>
         <div v-for="(m, i) in msgs" :key="i" :class="['m', m.role]">
           <div class="m-content">{{ m.content }}</div>
-          <button v-if="m.role === 'assistant'" class="copy" @click="copy(m)">复制</button>
+          <button v-if="m.role === 'assistant'" class="copy" @click="copy(m)">{{ L("copy") }}</button>
         </div>
         <div v-if="busy" class="m assistant"><div class="m-content thinking">思考中…</div></div>
       </div>
       <div class="ask-bar">
-        <input v-model="draft" placeholder="针对当前页提问…" @keydown.enter="askDraft" />
-        <button :disabled="busy" @click="askDraft">问</button>
+        <input v-model="draft" :placeholder="L('ask_page_ph')" @keydown.enter="askDraft" />
+        <button :disabled="busy" @click="askDraft">{{ L("ask") }}</button>
       </div>
     </div>
   </div>
@@ -83,6 +83,8 @@
 import { ref, nextTick, onMounted, onUnmounted } from "vue"
 
 const props = defineProps({ doc: Object })
+const L = (k) => _t(k)
+const langv = _lang
 defineEmits(["close"])
 
 const pages = ref([])
@@ -104,11 +106,11 @@ let pdfDoc = null
 let renderTask = null
 
 const quicks = [
-  { label: "📝 总结全文", question: "请总结这份文档的核心内容", scope: "all" },
-  { label: "💡 解释本页", question: "用大白话解释这一页的内容", scope: "page" },
-  { label: "📌 提取重点", question: "提取这一页的关键要点，分条列出", scope: "page" },
-  { label: "📓 生成笔记", question: "把这一页整理成结构化学习笔记(markdown要点式)", scope: "page" },
-  { label: "❓ 出3道题", question: "基于这一页内容出3道自测题并附答案", scope: "page" }
+  { label: L("qa_sum_all"), question: langv === "zh" ? "请总结这份文档的核心内容" : "Summarize the core content of this document", scope: "all" },
+  { label: L("qa_explain_page"), question: langv === "zh" ? "用大白话解释这一页的内容" : "Explain this page in plain language", scope: "page" },
+  { label: L("qa_key_points"), question: langv === "zh" ? "提取这一页的关键要点，分条列出" : "Extract the key points of this page as a list", scope: "page" },
+  { label: L("qa_notes"), question: langv === "zh" ? "把这一页整理成结构化学习笔记(markdown要点式)" : "Turn this page into structured study notes (markdown bullets)", scope: "page" },
+  { label: L("qa_quiz"), question: langv === "zh" ? "基于这一页内容出3道自测题并附答案" : "Create 3 self-test questions with answers from this page", scope: "page" }
 ]
 
 async function load() {
@@ -121,7 +123,7 @@ async function load() {
     kind.value = r.kind || "text"
     jumpTo.value = pages.value[0]?.page ?? 1
   } catch (e) {
-    loadErr.value = "原文加载失败: " + e.message + "（可能已被删除或丢失，请重新上传）"
+    loadErr.value = L("load_fail") + e.message + (langv === "zh" ? "（可能已被删除或丢失，请重新上传）" : "(it may have been deleted, please re-upload)")
   }
 }
 load()

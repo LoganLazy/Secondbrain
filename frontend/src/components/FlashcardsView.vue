@@ -1,40 +1,40 @@
 <template>
   <div class="fc">
     <div class="stats-row">
-      <div class="st"><b>{{ st.total }}</b><span>总卡片</span></div>
-      <div class="st hot"><b>{{ st.due }}</b><span>今日待复习</span></div>
-      <div class="st"><b>{{ st.mastered }}</b><span>已掌握</span></div>
-      <div class="st"><b>{{ st.accuracy === null ? "—" : st.accuracy + "%" }}</b><span>正确率</span></div>
+      <div class="st"><b>{{ st.total }}</b><span>{{ L("fc_total") }}</span></div>
+      <div class="st hot"><b>{{ st.due }}</b><span>{{ L("fc_due") }}</span></div>
+      <div class="st"><b>{{ st.mastered }}</b><span>{{ L("fc_mastered") }}</span></div>
+      <div class="st"><b>{{ st.accuracy === null ? "—" : st.accuracy + "%" }}</b><span>{{ L("fc_acc") }}</span></div>
     </div>
 
     <!-- 复习模式 -->
     <template v-if="reviewing">
       <div class="progress">
-        第 {{ done + 1 }} / {{ queue.length }} 张
-        <button class="quit" @click="stopReview">退出复习</button>
+        {{ done + 1 }} / {{ queue.length }}
+        <button class="quit" @click="stopReview">{{ L("fc_quit") }}</button>
       </div>
       <div class="bigcard" :class="{ flipped: showAns }" @click="showAns = true">
         <div class="q-side">
-          <div class="tag">问题</div>
+          <div class="tag">{{ L("fc_q_tag") }}</div>
           <div class="text">{{ queue[idx]?.q }}</div>
-          <div class="hint">点击卡片查看答案</div>
+          <div class="hint">{{ L("fc_flip_hint") }}</div>
         </div>
         <div v-if="showAns" class="a-side">
-          <div class="tag">答案</div>
+          <div class="tag">{{ L("fc_a_tag") }}</div>
           <div class="text">{{ queue[idx]?.a }}</div>
         </div>
       </div>
       <div v-if="showAns" class="grade">
-        <button class="g wrong" @click="grade('wrong')">😵 不会</button>
-        <button class="g fuzzy" @click="grade('fuzzy')">🤔 模糊</button>
-        <button class="g ok" @click="grade('correct')">😀 会了</button>
+        <button class="g wrong" @click="grade('wrong')">{{ L("g_wrong") }}</button>
+        <button class="g fuzzy" @click="grade('fuzzy')">{{ L("g_fuzzy") }}</button>
+        <button class="g ok" @click="grade('correct')">{{ L("g_ok") }}</button>
       </div>
     </template>
 
     <!-- 管理面板 -->
     <template v-else>
       <div class="gen card">
-        <h4>🤖 AI 自动出题</h4>
+        <h4>{{ L("fc_gen_h") }}</h4>
         <div class="gen-row">
           <select v-model="docId">
             <option v-for="d in docs" :key="d.id" :value="d.id">{{ d.title || d.filename }}</option>
@@ -45,14 +45,14 @@
             <option :value="15">15张</option>
           </select>
           <button :disabled="generating || !docId" @click="generate">
-            {{ generating ? "出题中…" : "生成闪卡" }}
+            {{ generating ? L("fc_generating") : L("fc_gen") }}
           </button>
         </div>
         <div v-if="genMsg" class="msg">{{ genMsg }}</div>
       </div>
 
       <button v-if="queue.length" class="btn-review" @click="startReview">
-        🔔 开始今日复习（{{ queue.length }} 张）
+        🔔 {{ L("fc_start") }} ({{ queue.length }})
       </button>
 
       <div class="list">
@@ -61,14 +61,14 @@
             <b>{{ c.q }}</b>
             <span class="ans">{{ c.a }}</span>
             <span class="meta">
-              复习{{ c.reviews }}次 · 掌握度
+              {{ langv === "zh" ? `复习${c.reviews}次` : `${c.reviews} reviews` }} · {{ langv === "zh" ? "掌握度" : "Mastery" }}
               <i v-for="n in 5" :key="n" :class="['dot', { on: n <= c.box }]"></i>
-              <em v-if="c.last_result === 'wrong'" class="wrong-tag">上次答错</em>
+              <em v-if="c.last_result === 'wrong'" class="wrong-tag">{{ langv === "zh" ? "上次答错" : "Missed last time" }}</em>
             </span>
           </div>
           <button class="del" @click="del(c.id)">🗑</button>
         </div>
-        <div v-if="!all.length" class="none">还没有卡片，先用上面的按钮从文档生成吧</div>
+        <div v-if="!all.length" class="none">{{ L("fc_none") }}</div>
       </div>
     </template>
   </div>
@@ -76,6 +76,7 @@
 
 <script setup>
 import { ref, onMounted } from "vue"
+import { t as _t, lang as _lang } from "../i18n"
 import { api } from "../api"
 
 const st = ref({ total: 0, due: 0, mastered: 0, accuracy: null })
@@ -91,6 +92,8 @@ const idx = ref(0)
 const done = ref(0)
 const showAns = ref(false)
 
+const L = (k) => _t(k)
+const langv = _lang
 onMounted(load)
 async function load() {
   try {
@@ -115,7 +118,7 @@ async function generate() {
     genMsg.value = d.count !== undefined ? `✓ 生成了 ${d.count} 张卡片` : (d.detail || "失败")
     load()
   } catch (e) {
-    genMsg.value = "出错: " + e.message
+    genMsg.value = (langv === "zh" ? "出错: " : "Error: ") + e.message
   }
   generating.value = false
 }
@@ -142,13 +145,13 @@ async function grade(result) {
   idx.value++
   done.value++
   if (idx.value >= queue.value.length) {
-    alert("本轮复习完成！")
+    alert(L("fc_done_alert"))
     stopReview()
   }
 }
 
 async function del(id) {
-  if (!confirm("删除这张卡片？")) return
+  if (!confirm(langv === "zh" ? "删除这张卡片？" : "Delete this card?")) return
   await api.delCard(id)
   load()
 }

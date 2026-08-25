@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from . import config, db, ingest, rag
 from . import cards as cards_mod
 
-app = FastAPI(title="Memory AI")
+app = FastAPI(title="SecondBrain")
 
 
 def log(msg: str):
@@ -115,7 +115,7 @@ class AssistIn(BaseModel):
 def assist(a: AssistIn):
     """阅读助手: 基于指定段落/全文回答, 不走知识库检索"""
     sys_prompt = (
-        "你是Memory AI的阅读助手。用户正在阅读自己的文档"
+        "You are SecondBrain's reading assistant. 回答语言与用户提问语言一致。用户正在阅读自己的文档"
         + (f"《{a.title}》第{a.page}页" if a.page else f"《{a.title}》" if a.title else "")
         + "。用简洁中文回答；若提供了文档片段，答案必须基于片段内容。"
     )

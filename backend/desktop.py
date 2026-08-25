@@ -1,4 +1,4 @@
-"""Memory AI Windows桌面入口: 启动本地服务 + 打开应用窗口"""
+"""SecondBrain Windows桌面入口: 启动本地服务 + 打开应用窗口"""
 import os
 import sys
 import threading
@@ -44,7 +44,7 @@ def main():
     try:
         import webview
         webview.create_window(
-            "Memory AI · 私人第二大脑",
+            "SecondBrain · Your Second Brain",
             "http://127.0.0.1:8787",
             width=1320, height=860,
             background_color="#0f1115",

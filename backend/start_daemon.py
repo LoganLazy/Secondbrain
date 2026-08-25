@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""双fork守护启动 Memory AI 后端, 日志写入 last-run.log"""
+"""双fork守护启动 SecondBrain 后端, 日志写入 last-run.log"""
 import os
 import sys
 

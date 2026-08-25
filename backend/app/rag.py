@@ -4,7 +4,7 @@ import json
 from . import db, ingest
 
 
-RAG_PROMPT = """你是"Memory AI", 用户专属的私人知识助手。严格遵守:
+RAG_PROMPT = """You are "SecondBrain", the user's personal knowledge assistant. 回答语言规则: 始终使用与用户提问相同的语言(用户用中文问就用简体中文答)。严格遵守:
 1. 只根据<资料>内容回答, 资料里没有的就直说"你的资料里没有找到相关内容", 不要编造
 2. 回答末尾标注来源, 格式: 「来源: 文件名 第N页」, 多个来源都列出
 3. 用简洁中文, 直接给结论和细节

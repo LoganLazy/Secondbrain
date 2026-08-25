@@ -1,53 +1,53 @@
 <template>
   <div class="chat">
     <div class="sess-bar">
-      <button class="sb-new" @click="newSession">＋ 新对话</button>
+      <button class="sb-new" @click="newSession">{{ L("sess_new") }}</button>
       <select v-model="currentSid" @change="switchSession" class="sb-select">
         <option v-for="ss in sessions" :key="ss.id" :value="ss.id">{{ ss.title }}</option>
       </select>
-      <button class="sb-icon" title="重命名" @click="renameSession">✏</button>
-      <button class="sb-icon" title="删除会话" @click="delSession">🗑</button>
+      <button class="sb-icon" :title="L('sess_rename_t')" @click="renameSession">✏</button>
+      <button class="sb-icon" :title="t('sess_del_c')" @click="delSession">🗑</button>
     </div>
 
     <div class="messages" ref="box">
       <div v-if="review && (review.due_cards || review.picks?.length)" class="review-banner">
         <div class="rb-line">
-          🔔 今日回顾:
+          🔔 {{ L("review_today") }}
           <button v-if="review.due_cards" class="rb-btn"
                   @click="$emit('switchTab', 'cards')">
-            {{ review.due_cards }} 张闪卡待复习 →
+            {{ review.due_cards }} {{ L("cards_due") }}
           </button>
         </div>
         <div v-if="review.picks?.length" class="rb-picks">
-          推荐重读:
+          {{ L("reread") }}
           <button v-for="p in review.picks" :key="p.id" class="rb-btn"
                   @click="$emit('openDoc', p)">
-            《{{ p.title || '未命名' }}》
+            《{{ p.title }}》
           </button>
         </div>
       </div>
 
       <div v-if="list.length === 0" class="empty">
         <div class="e-icon">💬</div>
-        <h3>问点你资料里的事</h3>
-        <p>比如：「我之前是怎么配置网络代理的？」</p>
+        <h3>{{ L("empty_h") }}</h3>
+        <p>{{ L("empty_p") }}</p>
       </div>
 
       <div v-for="(m, i) in list" :key="i" :class="['msg', m.role]">
-        <div class="avatar">{{ m.role === "user" ? "我" : "AI" }}</div>
+        <div class="avatar">{{ m.role === "user" ? (lang === "zh" ? "我" : "Me") : "AI" }}</div>
         <div class="bubble">
           <div class="content">{{ m.content }}</div>
           <div v-if="m.sources && m.sources.length" class="sources">
-            <span class="s-title">参考资料</span>
+            <span class="s-title">{{ L("sources") }}</span>
             <a v-for="(s, si) in m.sources" :key="si" class="chip"
                @click="$emit('openDoc', s)">
-              📄 {{ s.title }} <em>第{{ s.page }}页 · {{ Math.round(s.score * 100) }}%匹配</em>
+              📄 {{ s.title }} <em>{{ L("page_n") }}{{ s.page }} · {{ Math.round(s.score * 100) }}%</em>
             </a>
             <details class="cite-details">
-              <summary>查看引用的原始段落</summary>
+              <summary>{{ L("view_passages") }}</summary>
               <div v-for="(s, si) in m.sources" :key="'t' + si" class="cite-item">
-                <b>《{{ s.title }}》第{{ s.page }}页</b>
-                <p>{{ s.text || '(未存片段)' }}</p>
+                <b>《{{ s.title }}》 {{ s.page }}</b>
+                <p>{{ s.text || '-' }}</p>
               </div>
             </details>
           </div>
@@ -56,25 +56,30 @@
 
       <div v-if="thinking" class="msg assistant">
         <div class="avatar">AI</div>
-        <div class="bubble thinking">正在检索你的知识库…</div>
+        <div class="bubble thinking">{{ L("thinking") }}</div>
       </div>
     </div>
 
     <div class="inputbar">
       <input
         v-model="draft"
-        placeholder="输入问题，Enter 发送…"
+        :placeholder="L('chat_ph')"
         :disabled="thinking"
         @keydown.enter="send"
       />
-      <button :disabled="thinking || !draft.trim()" @click="send">发送</button>
+      <button :disabled="thinking || !draft.trim()" @click="send">{{ L("send") }}</button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted } from "vue"
+import { ref, computed, nextTick, onMounted } from "vue"
 import { api } from "../api"
+import { t, lang } from "../i18n"
+const L = computed(() => {
+  void lang.value  // 依赖语言, 切换时刷新所有文案
+  return (k, v) => t(k, v)
+})
 
 defineEmits(["openDoc", "switchTab"])
 const list = ref([])
@@ -113,18 +118,18 @@ async function switchSession() {
 
 async function renameSession() {
   const cur = sessions.value.find((x) => x.id === currentSid.value)
-  const t = prompt("重命名会话:", cur?.title || "")
-  if (!t?.trim()) return
+  const _pt = prompt(t("sess_rename_t"), cur?.title || "")
+  if (!_pt?.trim()) return
   await fetch(`/api/sessions/${currentSid.value}/rename`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: t.trim() })
+    body: JSON.stringify({ title: _pt.trim() })
   })
   if (cur) cur.title = t.trim()
 }
 
 async function delSession() {
-  if (!confirm("删除该会话及全部聊天记录？")) return
+  if (!confirm(t("sess_del_c"))) return
   await fetch(`/api/sessions/${currentSid.value}`, { method: "DELETE" })
   sessions.value = sessions.value.filter((x) => x.id !== currentSid.value)
   if (sessions.value.length) {
@@ -186,9 +191,9 @@ async function send() {
         }
       }
     }
-    if (cur && !cur.content) cur.content = "(AI未能给出有效回答，请重试)"
+    if (cur && !cur.content) cur.content = t(lang.value === "zh" ? "(AI未能给出有效回答，请重试)" : "(No valid answer, please try again)")
   } catch (e) {
-    list.value.push({ role: "assistant", content: "网络错误: " + e.message })
+    list.value.push({ role: "assistant", content: L("net_err") + e.message })
   }
   thinking.value = false
   scroll()

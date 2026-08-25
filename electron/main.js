@@ -19,11 +19,11 @@ function homeDir() {
 }
 
 function startBackend() {
-  // 打包版: resources/backend/MemoryAI-backend/MemoryAI-backend.exe
+  // 打包版: resources/backend/SecondBrain-backend/SecondBrain-backend.exe
   const res = process.resourcesPath || path.join(__dirname, "resources")
   const candidates = [
-    path.join(res, "backend", "MemoryAI-backend", "MemoryAI-backend.exe"),
-    path.join(__dirname, "..", "server", "MemoryAI-backend.exe"),
+    path.join(res, "backend", "SecondBrain-backend", "SecondBrain-backend.exe"),
+    path.join(__dirname, "..", "server", "SecondBrain-backend.exe"),
   ]
   const exe = candidates.find((p) => {
     try { return require("fs").existsSync(p) } catch (e) { return false }
@@ -56,7 +56,7 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1320,
     height: 860,
-    title: "Memory AI",
+    title: "SecondBrain",
     autoHideMenuBar: true,
     backgroundColor: "#0f1115",
     webPreferences: { contextIsolation: true },

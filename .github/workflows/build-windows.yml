@@ -32,7 +32,7 @@ jobs:
         working-directory: backend
         run: |
           pip install -r requirements.txt pyinstaller
-          pyinstaller --onedir --noconsole --name MemoryAI-backend server_entry.py
+          pyinstaller --onedir --noconsole --name SecondBrain-backend server_entry.py
           --paths .
           --add-data "../frontend/dist;frontend_dist"
           --hidden-import uvicorn.logging
@@ -63,12 +63,12 @@ jobs:
           # Electron壳
           Copy-Item electron/out/win-unpacked/* $root -Recurse -Force
           # 后端引擎
-          Copy-Item backend/dist/MemoryAI-backend/* "$root/resources/backend/" -Recurse -Force
+          Copy-Item backend/dist/SecondBrain-backend/* "$root/resources/backend/" -Recurse -Force
           Copy-Item README.md $root/
-          Compress-Archive -Path package/* -DestinationPath MemoryAI-Windows-x64.zip
+          Compress-Archive -Path package/* -DestinationPath SecondBrain-Windows-x64.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MemoryAI-Windows-x64
-          path: MemoryAI-Windows-x64.zip
+          name: SecondBrain-Windows-x64
+          path: SecondBrain-Windows-x64.zip
