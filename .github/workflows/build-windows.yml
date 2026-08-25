@@ -28,10 +28,16 @@ jobs:
           npm ci || npm install --no-audit --no-fund
           npm run build
 
-      - name: Build backend engine (PyInstaller onedir)
+      - name: Install backend deps
         working-directory: backend
         run: |
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt
+          pip install -r requirements-ocr.txt
+          pip install pyinstaller
+
+      - name: Build backend engine (PyInstaller onedir)
+        working-directory: backend
+        run: >-
           pyinstaller --onedir --noconsole --name SecondBrain-backend server_entry.py
           --paths .
           --add-data "../frontend/dist;frontend_dist"
