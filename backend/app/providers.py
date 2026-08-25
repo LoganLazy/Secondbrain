@@ -9,12 +9,20 @@ from . import config
 
 
 def _mock_embed(texts: list[str]) -> list[list[float]]:
-    """确定性哈希词袋向量(256维), 仅用于无Key时的离线联调."""
+    """确定性哈希词袋向量(256维), 仅用于无Key时的离线联调.
+    中文按单字切分+相邻二字组词, 英文按单词."""
     dim = 256
     out = []
     for text in texts:
         vec = [0.0] * dim
-        for tok in re.findall(r"[\w\u4e00-\u9fff]+", text.lower()):
+        text = text.lower()
+        toks = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", text)
+        # 中文再加bigram提升区分度
+        cjk_runs = re.findall(r"[\u4e00-\u9fff]+", text)
+        bigrams = []
+        for run in cjk_runs:
+            bigrams += [run[i:i + 2] for i in range(len(run) - 1)]
+        for tok in toks + bigrams:
             h = int(hashlib.md5(tok.encode()).hexdigest(), 16)
             vec[h % dim] += 1.0 + (h % 7) / 10
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0

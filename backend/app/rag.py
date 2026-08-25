@@ -24,6 +24,10 @@ def build_context(hits: list[dict]) -> str:
 
 def chat(question: str) -> dict:
     hits = ingest.search(question)
+    # 相对相关度门槛: 过滤掉明显不相关的干扰来源(适配不同向量模型)
+    if hits:
+        best = max(h["score"] for h in hits)
+        hits = [h for h in hits if h["score"] >= best * 0.55 and h["score"] > 0.05]
     if not hits:
         answer = "你的知识库里还没有任何资料，先上传一些文档吧。"
         return {"answer": answer, "sources": []}

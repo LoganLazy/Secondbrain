@@ -19,4 +19,9 @@ os.dup2(log.fileno(), 2)
 
 py = os.path.join(DIR, ".venv", "bin", "python")
 os.chdir(DIR)
+
+# 写PID文件供停止脚本使用
+with open(os.path.join(DIR, ".pid"), "w") as f:
+    f.write(str(os.getpid()))
+
 os.execv(py, [py, "-m", "uvicorn", "app.main:app", "--port", "8787"])
