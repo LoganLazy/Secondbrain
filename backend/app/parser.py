@@ -1,7 +1,9 @@
 """文档解析: PDF(带页码)/DOCX/TXT/MD -> 统一结构 + 滑窗切块"""
 from pathlib import Path
 
-from . import config
+from . import config, ocr
+
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
 
 def parse(path: Path) -> list[tuple[str, int]]:
@@ -9,6 +11,8 @@ def parse(path: Path) -> list[tuple[str, int]]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _parse_pdf(path)
+    if suffix in IMAGE_EXTS:
+        return _parse_image(path)
     if suffix == ".docx":
         return _parse_docx(path)
     if suffix in (".txt", ".md", ""):
@@ -39,8 +43,25 @@ def _parse_pdf(path: Path) -> list[tuple[str, int]]:
             if text:
                 pages.append((text, i + 1))
     if not pages:
-        raise ValueError("这个PDF没有可提取的文字(可能是扫描件), 暂不支持")
+        # 无文字层 => 扫描版, 走OCR(需安装可选依赖)
+        if not ocr.available():
+            raise ValueError(
+                "这是扫描版PDF(没有文字层)。请先安装OCR支持: "
+                "pip install -r requirements-ocr.txt")
+        pages = ocr.ocr_pdf(path)
+        if not pages:
+            raise ValueError("扫描件OCR后仍未识别到文字, 可能是图片清晰度不足")
     return pages
+
+
+def _parse_image(path: Path) -> list[tuple[str, int]]:
+    if not ocr.available():
+        raise ValueError(
+            "识别图片需要安装OCR支持: pip install -r requirements-ocr.txt")
+    text = ocr.ocr_image_file(path)
+    if not text.strip():
+        raise ValueError("图片中没有识别到文字")
+    return [(text.strip(), 1)]
 
 
 def _parse_docx(path: Path) -> list[tuple[str, int]]:

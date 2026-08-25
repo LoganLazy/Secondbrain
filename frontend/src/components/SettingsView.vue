@@ -33,6 +33,17 @@
     <button class="save" :disabled="saving" @click="save">{{ saving ? "保存中…" : "💾 保存设置" }}</button>
     <div :class="['msg', msgOk ? 'ok' : 'bad']" v-if="msg">{{ msg }}</div>
 
+    <div class="card ocr-card">
+      <h4>🔍 OCR 扫描件识别（可选）</h4>
+      <template v-if="ocrOk">
+        <p class="okline">✓ 已安装。上传扫描版PDF或图片会自动走OCR识别。</p>
+      </template>
+      <template v-else>
+        <p class="okline bad">未安装 —— 上传扫描件/图片时会提示无法识别。</p>
+        <p>启用命令（后端环境执行）：<code>.venv/bin/pip install -r requirements-ocr.txt</code></p>
+      </template>
+    </div>
+
     <div class="card inbox-card">
       <h4>📁 知识库文件夹</h4>
       <p>把 PDF/Word/TXT/MD 丢进项目目录下的 <code>知识库文件夹</code>，会自动导入（每分钟扫描一次）。</p>
@@ -53,9 +64,12 @@ const saving = ref(false)
 const msg = ref("")
 const msgOk = ref(false)
 
+const ocrOk = ref(false)
+
 onMounted(async () => {
   const r = await fetch("/api/config")
   const c = await r.json()
+  ocrOk.value = !!c.ocr_available
   for (const k of Object.keys(cfg.value)) {
     if (k.endsWith("KEY")) continue
     cfg.value[k] = c[k] ?? ""
@@ -106,6 +120,8 @@ async function save() {
 </script>
 
 <style scoped>
+.okline.bad { color: #ff9b9b; }
+.ocr-card code { background: var(--bg); padding: 2px 6px; border-radius: 5px; }
 .settings { padding: 24px 34px; max-width: 720px; margin: 0 auto; }
 .tip { color: var(--muted); font-size: 13px; }
 

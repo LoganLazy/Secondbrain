@@ -2,8 +2,8 @@
   <div class="lib">
     <div class="toolbar">
       <label class="upbtn" :class="{ busy }">
-        {{ busy ? "处理中…" : "＋ 上传文档 (可多选)" }}
-        <input type="file" accept=".pdf,.docx,.txt,.md" multiple hidden @change="onFile" />
+        {{ busy ? "处理中…" : "＋ 上传文档/图片 (可多选)" }}
+        <input type="file" accept=".pdf,.docx,.txt,.md,.jpg,.png,.webp" multiple hidden @change="onFile" />
       </label>
       <button class="webbtn" @click="linkModal = true">🔗 导入网页</button>
       <input v-model="q" class="search" placeholder="🔍 语义搜索：用大白话描述你要找的东西，Enter 搜索"

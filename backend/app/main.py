@@ -53,7 +53,8 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
     results = []
     for file in files:
         suffix = Path(file.filename).suffix.lower()
-        if suffix not in (".pdf", ".docx", ".txt", ".md"):
+        if suffix not in (".pdf", ".docx", ".txt", ".md",
+                          ".jpg", ".jpeg", ".png", ".webp", ".bmp"):
             results.append({"file": file.filename, "ok": False,
                             "msg": f"暂不支持 {suffix} 格式"})
             continue
@@ -278,6 +279,8 @@ def get_config():
         v = config.get(k) or ""
         out[k] = {"set": bool(v), "preview": (v[:6] + "…" + v[-4:]) if len(v) > 12 else ("已设置" if v else "")}
     out["LABELS"] = config.LABELS
+    from . import ocr
+    out["ocr_available"] = ocr.available()
     return out
 
 
