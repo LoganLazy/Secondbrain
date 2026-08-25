@@ -1,0 +1,162 @@
+<template>
+  <div class="lib">
+    <div class="toolbar">
+      <label class="upbtn" :class="{ busy }">
+        {{ busy ? "处理中…" : "＋ 上传文档 (pdf / docx / txt / md)" }}
+        <input type="file" accept=".pdf,.docx,.txt,.md" hidden @change="onFile" />
+      </label>
+      <input v-model="q" class="search" placeholder="🔍 语义搜索：用大白话描述你要找的东西，Enter 搜索"
+             @keydown.enter="doSearch" />
+    </div>
+
+    <div v-if="err" class="err">{{ err }}</div>
+
+    <div v-if="hits !== null" class="hits">
+      <h4>搜索结果（{{ hits.length }}）<button class="linkbtn" @click="clearSearch">返回列表</button></h4>
+      <div v-for="(h, i) in hits" :key="i" class="hit card">
+        <div class="hit-head">
+          📄 {{ h.title }} · 第{{ h.page }}页
+          <span class="score">{{ Math.round(h.score * 100) }}% 匹配</span>
+        </div>
+        <p>{{ h.text.slice(0, 260) }}…</p>
+      </div>
+      <div v-if="!hits.length" class="none">没找到相关内容</div>
+    </div>
+
+    <div v-else class="docs">
+      <div v-for="d in docs" :key="d.id" class="card doc">
+        <div class="doc-main">
+          <div class="doc-title">
+            {{ d.title || d.filename }}
+            <span class="cat">{{ d.category }}</span>
+          </div>
+          <div class="doc-summary">{{ d.summary || "（暂无摘要）" }}</div>
+          <div class="doc-meta">
+            <span v-for="t in d.tags" :key="t" class="tag">#{{ t }}</span>
+            <span class="meta">{{ d.chunks }} 条知识 · {{ fmtTime(d.created) }}</span>
+          </div>
+        </div>
+        <button class="del" title="删除" @click="del(d)">🗑</button>
+      </div>
+      <div v-if="!docs.length && !busy" class="none">知识库还是空的，上传第一份文档吧</div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted } from "vue"
+import { api } from "../api"
+
+const docs = ref([])
+const q = ref("")
+const hits = ref(null)
+const busy = ref(false)
+const err = ref("")
+
+onMounted(load)
+async function load() {
+  docs.value = await api.docs()
+}
+
+async function onFile(e) {
+  const file = e.target.files[0]
+  e.target.value = ""
+  if (!file) return
+  busy.value = true
+  err.value = ""
+  try {
+    await api.upload(file)
+    await load()
+  } catch (ex) {
+    err.value = "上传失败: " + ex.message
+  }
+  busy.value = false
+}
+
+async function doSearch() {
+  if (!q.value.trim()) return
+  hits.value = null
+  hits.value = await api.search(q.value.trim())
+}
+function clearSearch() { hits.value = null; q.value = "" }
+
+async function del(d) {
+  if (!confirm(`删除《${d.title || d.filename}》及其全部知识条目？`)) return
+  await api.delDoc(d.id)
+  load()
+}
+
+function fmtTime(t) {
+  const d = new Date((t || 0) * 1000)
+  return `${d.getMonth() + 1}-${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+}
+</script>
+
+<style scoped>
+.lib { padding: 22px 30px; max-width: 980px; margin: 0 auto; }
+
+.toolbar { display: flex; gap: 14px; margin-bottom: 20px; }
+.upbtn {
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  color: #fff;
+  border-radius: 12px;
+  padding: 13px 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.upbtn.busy { opacity: 0.6; pointer-events: none; }
+.search {
+  flex: 1;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 16px;
+  color: var(--text);
+  outline: none;
+}
+.search:focus { border-color: var(--accent); }
+
+.card {
+  background: var(--panel2);
+  border-radius: 14px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+}
+
+.doc { display: flex; align-items: center; gap: 14px; }
+.doc-main { flex: 1; }
+.doc-title { font-weight: 700; font-size: 16px; }
+.cat {
+  font-size: 12px;
+  background: #24304f;
+  color: #9db7ff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  margin-left: 8px;
+  vertical-align: 2px;
+}
+.doc-summary { color: var(--muted); margin-top: 5px; font-size: 13.5px; }
+.doc-meta { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tag { color: #7fb0ff; font-size: 12.5px; }
+.meta { color: var(--muted); font-size: 12.5px; }
+.del { background: none; border: none; cursor: pointer; font-size: 17px; opacity: 0.5; }
+.del:hover { opacity: 1; }
+
+.hit-head { font-weight: 600; }
+.score { color: var(--ok); font-size: 12.5px; margin-left: 8px; }
+.hit p { color: var(--muted); font-size: 13.5px; line-height: 1.6; margin: 8px 0 0; }
+.none { text-align: center; color: var(--muted); padding: 40px; }
+.err {
+  background: #3a2226;
+  border: 1px solid #5c3036;
+  color: #ff9b9b;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.linkbtn {
+  background: none; border: none; color: var(--accent);
+  cursor: pointer; margin-left: 12px; font-size: 13px;
+}
+</style>

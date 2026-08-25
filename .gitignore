@@ -1,0 +1,12 @@
+node_modules/
+backend/.venv/
+backend/data/
+backend/last-run.log
+.env
+runtime/
+guilibs/
+docs/*.pdf
+__pycache__/
+*.pyc
+core.*
+frontend/dist/
