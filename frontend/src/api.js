@@ -23,6 +23,10 @@ export const api = {
   memoryList: () => jfetch("/api/memory"),
   addMemory: (content) => jfetch("/api/memory", { method: "POST", body: JSON.stringify({ content }) }),
   delMemory: (id) => jfetch(`/api/memory/${id}`, { method: "DELETE" }),
+  fcList: (docId) => jfetch(`/api/flashcards${docId ? `?doc_id=${docId}` : ""}`),
+  fcDue: () => jfetch("/api/flashcards/due"),
+  fcStats: () => jfetch("/api/flashcards/stats"),
+  delCard: (id) => jfetch(`/api/flashcards/${id}`, { method: "DELETE" }),
 
   async upload(file, onProgress) {
     const fd = new FormData()

@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config, db, ingest, rag
+from . import cards as cards_mod
 
 app = FastAPI(title="Memory AI")
 app.add_middleware(
@@ -159,6 +160,60 @@ def stats():
     docs = db.get().execute("SELECT COUNT(*) c FROM docs").fetchone()["c"]
     chunks = ingest._col.count()
     return {"docs": docs, "chunks": chunks}
+
+
+# ---------------- 闪卡 ----------------
+
+class GenIn(BaseModel):
+    doc_id: int
+    num: int = 10
+
+
+@app.post("/api/flashcards/generate")
+def fc_generate(q: GenIn):
+    try:
+        n = cards_mod.generate(q.doc_id, q.num)
+        return {"code": 0, "count": n}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"出题失败: {e}")
+
+
+@app.get("/api/flashcards")
+def fc_list(doc_id: int | None = None):
+    return cards_mod.list_cards(doc_id)
+
+
+@app.get("/api/flashcards/due")
+def fc_due():
+    return cards_mod.due_queue()
+
+
+class AnswerIn(BaseModel):
+    result: str
+
+
+@app.post("/api/flashcards/{card_id}/answer")
+def fc_answer(card_id: int, a: AnswerIn):
+    if a.result not in ("correct", "fuzzy", "wrong"):
+        raise HTTPException(400, "result 必须是 correct/fuzzy/wrong")
+    try:
+        cards_mod.answer(card_id, a.result)
+        return {"code": 0}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.delete("/api/flashcards/{card_id}")
+def fc_delete(card_id: int):
+    cards_mod.delete(card_id)
+    return {"code": 0}
+
+
+@app.get("/api/flashcards/stats")
+def fc_stats():
+    return cards_mod.stats()
 
 
 # 生产模式挂载前端构建产物(存在才生效)

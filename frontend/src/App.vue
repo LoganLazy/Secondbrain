@@ -6,6 +6,7 @@
     </template>
     <ChatView v-else-if="tab === 'chat'" />
     <LibraryView v-else-if="tab === 'library'" @openDoc="openReader" @uploaded="sidebar && sidebar.load()" />
+    <FlashcardsView v-else-if="tab === 'cards'" />
     <MemoryView v-else />
   </main>
 </template>
@@ -17,6 +18,7 @@ import ChatView from "./components/ChatView.vue"
 import LibraryView from "./components/LibraryView.vue"
 import MemoryView from "./components/MemoryView.vue"
 import ReaderView from "./components/ReaderView.vue"
+import FlashcardsView from "./components/FlashcardsView.vue"
 
 const tab = ref("chat")
 const sidebar = ref(null)
