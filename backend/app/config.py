@@ -28,11 +28,12 @@ CHAT_BASE_URL = os.environ.get("CHAT_BASE_URL", "https://api.deepseek.com")
 CHAT_KEY = os.environ.get("DEEPSEEK_KEY", "")
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "deepseek-chat")
 
-# ---- 向量模型 ----
-# provider: zhipu=智谱embedding-3(云端) | mock=本地哈希向量(离线测试用)
+# ---- 向量模型(OpenAI兼容embeddings接口) ----
+# provider: zhipu/任意兼容=云端 | mock=本地哈希向量(离线测试用)
 EMBED_PROVIDER = os.environ.get("EMBED_PROVIDER", "zhipu")
 ZHIPU_KEY = os.environ.get("ZHIPU_KEY", "")
-ZHIPU_EMBED_MODEL = os.environ.get("ZHIPU_EMBED_MODEL", "embedding-3")
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+ZHIPU_EMBED_MODEL = os.environ.get("EMBED_MODEL", os.environ.get("ZHIPU_EMBED_MODEL", "embedding-3"))
 
 # ---- 检索参数 ----
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "500"))

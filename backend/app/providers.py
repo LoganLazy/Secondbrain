@@ -1,6 +1,7 @@
-"""向量化提供方: 智谱embedding-3(云端) / mock(离线哈希向量, 测试用)"""
+"""向量化提供方: 任意OpenAI兼容embeddings接口(智谱/硅基流动/Ollama...) / mock(离线测试)"""
 import hashlib
 import math
+import os
 import re
 
 import httpx
@@ -17,7 +18,6 @@ def _mock_embed(texts: list[str]) -> list[list[float]]:
         vec = [0.0] * dim
         text = text.lower()
         toks = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", text)
-        # 中文再加bigram提升区分度
         cjk_runs = re.findall(r"[\u4e00-\u9fff]+", text)
         bigrams = []
         for run in cjk_runs:
@@ -31,22 +31,30 @@ def _mock_embed(texts: list[str]) -> list[list[float]]:
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    if config.EMBED_PROVIDER == "mock" or not config.ZHIPU_KEY:
+    if config.EMBED_PROVIDER == "mock":
         return _mock_embed(texts)
-    return _zhipu_embed(texts)
+    return _remote_embed(texts)
 
 
-def _zhipu_embed(texts: list[str]) -> list[list[float]]:
-    url = "https://open.bigmodel.cn/api/paas/v4/embeddings"
-    headers = {"Authorization": f"Bearer {config.ZHIPU_KEY}"}
+def _remote_embed(texts: list[str]) -> list[list[float]]:
+    """调用 OpenAI 兼容 /embeddings 接口.
+    通过环境变量切换供应商(注意: 切换后需重建知识库):
+      智谱     EMBED_BASE_URL=https://open.bigmodel.cn/api/paas/v4  EMBED_MODEL=embedding-3
+      硅基流动  EMBED_BASE_URL=https://api.siliconflow.cn/v1        EMBED_MODEL=BAAI/bge-m3 (免费)
+      ollama   EMBED_BASE_URL=http://127.0.0.1:11434/v1             EMBED_MODEL=bge-m3
+    """
+    base = os.environ.get("EMBED_BASE_URL", config.EMBED_BASE_URL).rstrip("/")
+    key = os.environ.get("EMBED_KEY", config.ZHIPU_KEY)
+    model = os.environ.get("EMBED_MODEL", config.ZHIPU_EMBED_MODEL)
+    headers = {"Authorization": f"Bearer {key}"}
     vectors: list[list[float]] = []
-    # 智谱单次最多64条
-    for i in range(0, len(texts), 64):
-        batch = texts[i:i + 64]
+    # 分批请求(多数服务单次上限64条)
+    for i in range(0, len(texts), 32):
+        batch = texts[i:i + 32]
         r = httpx.post(
-            url,
+            f"{base}/embeddings",
             headers=headers,
-            json={"model": config.ZHIPU_EMBED_MODEL, "input": batch},
+            json={"model": model, "input": batch},
             timeout=60,
         )
         r.raise_for_status()
