@@ -31,7 +31,7 @@ def _mock_embed(texts: list[str]) -> list[list[float]]:
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    if config.get("EMBED_PROVIDER") == "mock":
+    if config.get("EMBED_PROVIDER") == "mock" or config.get("NET_MODE") == "offline":
         return _mock_embed(texts)
     return _remote_embed(texts)
 

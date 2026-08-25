@@ -152,7 +152,8 @@ def search(request: Request, q: SearchQ):
     hits = ingest.search(q.query, q.k, kb_id=KB(request))
     return [
         {"title": h["title"], "filename": h["filename"], "page": h["page"],
-         "text": h["text"], "score": round(h["score"], 3)}
+         "text": h["text"], "score": round(h["score"], 3),
+         "semantic": round(h.get("vn", 0), 3), "keyword": round(h.get("kw", 0), 3)}
         for h in hits
     ]
 
@@ -205,6 +206,8 @@ def review_today(request: Request):
 
 def auto_memory(question: str, answer: str):
     """从对话中自动提取值得长期记住的用户信息"""
+    if config.get("NET_MODE") == "offline":
+        return
     try:
         existing = [r["content"] for r in db.get().execute(
             "SELECT content FROM memories ORDER BY id DESC LIMIT 100")]
@@ -277,6 +280,17 @@ def del_memory(mid: int):
     return {"code": 0}
 
 
+def _dir_size_mb(path) -> float:
+    total = 0
+    for f in Path(path).rglob("*"):
+        if f.is_file():
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return round(total / 1048576, 1)
+
+
 @app.get("/api/stats")
 def stats(request: Request):
     kb = KB(request)
@@ -284,7 +298,23 @@ def stats(request: Request):
         "SELECT COUNT(*) c FROM docs WHERE kb_id=?", (kb,)
     ).fetchone()["c"]
     chunks = len(ingest._col.get(where={"kb_id": kb})["ids"])
-    return {"docs": docs, "chunks": chunks}
+    lat = ingest.get_search_latency()
+    if lat is None:
+        est = "尚无检索记录"
+    else:
+        local = lat["local"]
+        if chunks < 2000:
+            grade = "流畅(本地<80ms)"
+        elif chunks < 10000:
+            grade = "良好(本地<250ms)"
+        else:
+            grade = "可用(资料量大, 建议关注性能)"
+        est = f"{grade} · 本地实测{local}ms · 含云端向量化共{lat['total']}ms"
+    return {"docs": docs, "chunks": chunks,
+            "db_size_mb": _dir_size_mb(config.DATA_DIR),
+            "search_ms": lat["total"] if lat else None,
+            "local_ms": lat["local"] if lat else None,
+            "perf_estimate": est}
 
 
 # ---------------- 会话 ----------------
@@ -370,7 +400,8 @@ class ConfigIn(BaseModel):
 @app.post("/api/config")
 def set_config(c: ConfigIn):
     allowed = {"CHAT_BASE_URL", "CHAT_MODEL", "EMBED_BASE_URL", "EMBED_MODEL",
-               "EMBED_PROVIDER", "DEEPSEEK_KEY", "ZHIPU_KEY"}
+               "EMBED_PROVIDER", "DEEPSEEK_KEY", "ZHIPU_KEY",
+               "NET_MODE", "FC_INTERVALS", "FC_MASTER_BOX"}
     patch = {k: str(v).strip() for k, v in c.patch.items() if k in allowed}
     config.save(patch)
     return {"code": 0}
@@ -489,6 +520,10 @@ def import_links(request: Request, body: LinksIn):
             if url:
                 results.append({"url": url, "ok": False, "msg": "不是有效链接"})
             continue
+        if config.get("NET_MODE") == "offline":
+            return {"code": 0,
+                    "results": [{"url": url, "ok": False,
+                                 "msg": "当前为离线模式，无法抓取网页"}]}
         try:
             # 同库URL去重
             dup = db.get().execute(

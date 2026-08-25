@@ -24,6 +24,9 @@ def call_chat(messages: list[dict], temperature: float = 0.3,
               max_tokens: int = 2000) -> str:
     import httpx
 
+    if config.get("NET_MODE") == "offline":
+        raise ValueError("当前为离线模式，AI对话不可用")
+
     # 推理模型会先消耗token思考, 预算不足会导致正文为空
     for budget in (max_tokens, max_tokens * 3, max_tokens * 5):
         r = httpx.post(
@@ -119,6 +122,18 @@ def ingest(path: Path, display_name: str | None = None,
     if exist:
         raise ValueError(f"该库中已有此文档: {exist['title'] or exist['filename']}")
 
+    # 版本更新: 同名文件内容变了 => 替换旧版本(保留文档ID)
+    old_row = db.get().execute(
+        "SELECT id, file_hash FROM docs WHERE filename=? AND kb_id=?",
+        (display_name or path.name, kb_id),
+    ).fetchone()
+    if old_row:
+        old_res = _col.get(where={"file_hash": old_row["file_hash"]})
+        for cid in old_res["ids"]:
+            bm25.INDEX.remove(cid)
+        if old_res["ids"]:
+            _col.delete(ids=old_res["ids"])
+
     pages = parser.parse(path)
     chunks = parser.chunk_text(pages)
     if not chunks:
@@ -144,6 +159,18 @@ def ingest(path: Path, display_name: str | None = None,
     }
 
     stored = str(keep_path) if keep_path else ""
+    if old_row:
+        db.get().execute(
+            "UPDATE docs SET title=?, category=?, tags=?, summary=?, chunks=?, "
+            "file_hash=?, file_path=? WHERE id=?",
+            (info["title"], info["category"],
+             json.dumps(info["tags"], ensure_ascii=False),
+             info["summary"], len(chunks), fh, stored, old_row["id"]),
+        )
+        db.get().commit()
+        return {"id": old_row["id"], **info, "chunks": len(chunks),
+                "filename": display_name or path.name, "updated": True}
+
     cur = db.get().execute(
         "INSERT INTO docs(filename,title,category,tags,summary,chunks,file_hash,"
         "created,file_path,kb_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -223,10 +250,40 @@ def _ensure_bm25():
         bm25.INDEX.add(cid, text, meta)
 
 
+_search_times: list[dict] = []
+
+
+def get_search_latency() -> dict:
+    """最近检索平均耗时(ms): total=全程, local=纯本地索引部分"""
+    if not _search_times:
+        return None
+    n = len(_search_times)
+    return {
+        "total": round(sum(x["total"] for x in _search_times) / n, 1),
+        "local": round(sum(x["local"] for x in _search_times) / n, 1),
+    }
+
+
 def search(query: str, k: int | None = None, kb_id: str = "default") -> list[dict]:
     """混合检索: 向量语义 + BM25关键词, 加权融合"""
     import os
+    import time as _time
 
+    t0 = _time.perf_counter()
+    marker = {"embed_done": False}
+    try:
+        result = _search_impl(query, k, kb_id, marker)
+        return result
+    finally:
+        total = (_time.perf_counter() - t0) * 1000
+        local = (_time.perf_counter() - (marker.get("t_embed_done") or t0)) * 1000
+        _search_times.append({"total": total, "local": local})
+        if len(_search_times) > 20:
+            _search_times.pop(0)
+
+
+def _search_impl(query: str, k: int | None = None,
+                 kb_id: str = "default", marker: dict | None = None) -> list[dict]:
     k = k or config.get("TOP_K")
     fetch = max(k * 3, 12)
     where = {"kb_id": kb_id}
@@ -259,6 +316,10 @@ def search(query: str, k: int | None = None, kb_id: str = "default") -> list[dic
         vmax = max(x["v"] for x in vec_results.values()) or 1.0
         for x in vec_results.values():
             x["vn"] = x["v"] / vmax
+
+    if marker is not None:
+        import time as _time
+        marker["t_embed_done"] = _time.perf_counter()
 
     # --- 关键词路(BM25) ---
     _ensure_bm25()

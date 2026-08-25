@@ -40,6 +40,12 @@
         <div class="hit-head">
           📄 {{ h.title }} · 第{{ h.page }}页
           <span class="score">{{ Math.round(h.score * 100) }}% 匹配</span>
+          <button class="dbg-btn" @click.stop="h._dbg = !h._dbg">🔬</button>
+        </div>
+        <div v-if="h._dbg" class="dbg">
+          语义分 {{ h.semantic?.toFixed?.(3) ?? h.semantic }} ·
+          关键词分 {{ h.keyword?.toFixed?.(3) ?? h.keyword }} ·
+          融合 = 语义×0.65 + 关键词×0.35
         </div>
         <p>{{ h.text.slice(0, 260) }}…</p>
       </div>
@@ -147,6 +153,10 @@ function fmtTime(t) {
 
 <style scoped>
 .lib { padding: 22px 30px; max-width: 980px; margin: 0 auto; }
+.dbg-btn { background: none; border: none; cursor: pointer; opacity: .55;
+           font-size: 13px; margin-left: 8px; }
+.dbg { background: var(--bg); border-radius: 8px; padding: 7px 10px;
+       margin-top: 6px; font-size: 12.5px; color: var(--muted); font-family: monospace; }
 
 .webbtn {
   background: var(--panel2); color: var(--text);

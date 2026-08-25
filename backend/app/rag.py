@@ -38,7 +38,8 @@ def chat_stream(question: str, kb_id: str = "default", session_id: str = ""):
     yield {"type": "sources",
            "sources": [{"doc_id": h["doc_id"], "title": h["title"],
                         "filename": h["filename"], "page": h["page"],
-                        "score": round(h["score"], 3)} for h in hits]}
+                        "score": round(h["score"], 3),
+                        "text": h["text"][:400]} for h in hits]}
 
     context = build_context(hits)
     conds, args = ["kb_id=?"], [kb_id]

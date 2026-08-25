@@ -19,6 +19,9 @@ DEFAULTS = {
     "EMBED_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
     "EMBED_MODEL": "embedding-3",
     "EMBED_PROVIDER": "zhipu",      # zhipu=远程 | mock=离线测试
+    "NET_MODE": "auto",             # auto自动降级 | online强制在线 | offline强制离线
+    "FC_INTERVALS": "0,1,2,4,7,15,30",
+    "FC_MASTER_BOX": 4,
     # 检索参数
     "CHUNK_SIZE": 500,
     "CHUNK_OVERLAP": 80,

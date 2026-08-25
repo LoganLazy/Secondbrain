@@ -95,6 +95,10 @@ def get() -> sqlite3.Connection:
             )
             _conn.execute("UPDATE chats SET session_id=? WHERE session_id='' AND kb_id=?",
                           (sid, kbv))
+        _conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
+            "cid UNINDEXED, body, meta_json UNINDEXED)"
+        )
         try:
             _conn.execute(
                 "CREATE TABLE IF NOT EXISTS kbs("

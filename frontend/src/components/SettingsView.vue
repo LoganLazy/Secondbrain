@@ -30,6 +30,28 @@
       </button>
     </div>
 
+    <div class="group card">
+      <h4>🌐 网络模式</h4>
+      <label><input type="radio" value="auto" v-model="cfg.NET_MODE" /> 自动（默认，远程失败自动降级）</label>
+      <label><input type="radio" value="online" v-model="cfg.NET_MODE" /> 强制在线</label>
+      <label><input type="radio" value="offline" v-model="cfg.NET_MODE" />
+        强制离线（AI问答/摘要/网页抓取不可用；上传仍可入库但无AI标题，搜索退化为字面匹配）</label>
+    </div>
+
+    <div class="group card">
+      <h4>🧠 复习参数</h4>
+      <label>间隔档位（天，逗号分隔，答对升一档/答错回零）</label>
+      <input v-model="cfg.FC_INTERVALS" placeholder="0,1,2,4,7,15,30" />
+      <label>掌握阈值（连续答对达到该档位记为已掌握）</label>
+      <input v-model="cfg.FC_MASTER_BOX" type="number" min="1" max="9" />
+    </div>
+
+    <div class="group card">
+      <h4>📊 知识库规模</h4>
+      <p class="cap-line">📄 文档 <b>{{ cap.docs }}</b> 篇 · 🧩 知识块 <b>{{ cap.chunks }}</b> 条 · 💾 占用 <b>{{ cap.db_size_mb }}MB</b></p>
+      <p class="cap-line">⚡ 检索性能预估：{{ cap.perf_estimate || '尚无检索记录' }}</p>
+    </div>
+
     <button class="save" :disabled="saving" @click="save">{{ saving ? "保存中…" : "💾 保存设置" }}</button>
     <div :class="['msg', msgOk ? 'ok' : 'bad']" v-if="msg">{{ msg }}</div>
 
@@ -55,9 +77,12 @@
 <script setup>
 import { ref, onMounted } from "vue"
 
+import { api } from "../api"
+
 const cfg = ref({
   CHAT_BASE_URL: "", CHAT_MODEL: "", DEEPSEEK_KEY: "",
-  EMBED_BASE_URL: "", EMBED_MODEL: "", ZHIPU_KEY: ""
+  EMBED_BASE_URL: "", EMBED_MODEL: "", ZHIPU_KEY: "",
+  NET_MODE: "auto", FC_INTERVALS: "0,1,2,4,7,15,30", FC_MASTER_BOX: 4
 })
 const testing = ref("")
 const saving = ref(false)
@@ -65,11 +90,16 @@ const msg = ref("")
 const msgOk = ref(false)
 
 const ocrOk = ref(false)
+const cap = ref({ docs: 0, chunks: 0, db_size_mb: 0, perf_estimate: "" })
 
 onMounted(async () => {
   const r = await fetch("/api/config")
   const c = await r.json()
   ocrOk.value = !!c.ocr_available
+  cfg.value.NET_MODE = c.NET_MODE || "auto"
+  cfg.value.FC_INTERVALS = c.FC_INTERVALS || "0,1,2,4,7,15,30"
+  cfg.value.FC_MASTER_BOX = c.FC_MASTER_BOX ?? 4
+  try { cap.value = await api.stats() } catch (e) {}
   for (const k of Object.keys(cfg.value)) {
     if (k.endsWith("KEY")) continue
     cfg.value[k] = c[k] ?? ""
@@ -154,5 +184,8 @@ async function save() {
 .msg.bad { color: #ff9b9b; }
 
 .inbox-card p { font-size: 13.5px; color: var(--muted); line-height: 1.7; }
+.group label { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
+.cap-line { margin: 4px 0; font-size: 14px; }
+.cap-line b { color: var(--accent); }
 .mono { font-family: monospace; }
 </style>

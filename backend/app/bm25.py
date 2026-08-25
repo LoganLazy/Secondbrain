@@ -1,78 +1,118 @@
-"""轻量BM25关键词检索, 与向量检索互补(精确命令/编号/专有名词场景)"""
+"""知识库全文索引: 基于 SQLite FTS5(中文bigram预分词), 替代自研BM25.
+
+接口与旧版兼容: INDEX.add/remove/search/clear/docs
+"""
+import hashlib
+import json
 import math
 import re
-from collections import Counter
+import threading
+
+from . import db
 
 
 def tokenize(text: str) -> list[str]:
-    """中文按字+bigram, 英文按词(与mock分词策略一致)"""
+    """中文按字+相邻二字组词, 英文按单词"""
     text = text.lower()
-    toks = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", text)
+    toks = re.findall(r"[a-z0-9]+", text)
     for run in re.findall(r"[\u4e00-\u9fff]+", text):
-        toks += [run[i:i + 2] for i in range(len(run) - 1)]
+        grams = [run[i:i + 2] for i in range(len(run) - 1)]
+        toks += grams if grams else [run]
     return toks
 
 
 class BM25Index:
-    def __init__(self, k1: float = 1.5, b: float = 0.75):
-        self.k1, self.b = k1, b
-        self.docs: dict[str, dict] = {}   # cid -> {tf: Counter, len: int, meta}
-        self.df: Counter = Counter()      # 词 -> 出现文档数
-        self.total_len = 0
+    """对外接口不变, 内部为FTS5虚拟表"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._ready = False
+        self._count = 0
+
+    # ---- 内部 ----
+    def _init_table(self):
+        if self._ready:
+            return
+        conn = db.get()
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
+            "cid UNINDEXED, body, meta_json UNINDEXED)"
+        )
+        self._count = conn.execute("SELECT COUNT(*) c FROM kb_fts").fetchone()["c"]
+        self._ready = True
+
+    @staticmethod
+    def _meta_json(meta: dict) -> str:
+        return json.dumps(meta, ensure_ascii=False)
+
+    # ---- 对外 ----
+    @property
+    def docs(self):
+        """兼容旧判空用法: 返回类dict对象(truthy=有数据)"""
+        class _D:
+            def __bool__(self2):
+                self._init_table()
+                return self._count > 0
+        return _D()
 
     def clear(self):
-        self.docs.clear()
-        self.df.clear()
-        self.total_len = 0
+        with self._lock:
+            self._init_table()
+            db.get().execute("DELETE FROM kb_fts")
+            db.get().commit()
+            self._count = 0
 
     def add(self, cid: str, text: str, meta: dict):
-        if cid in self.docs:
-            self.remove(cid)
-        toks = tokenize(text)
-        tf = Counter(toks)
-        self.docs[cid] = {"tf": tf, "len": len(toks), "meta": meta}
-        self.total_len += len(toks)
-        for w in tf:
-            self.df[w] += 1
+        self.add_batch([(cid, text, meta)])
+
+    def add_batch(self, items: list[tuple[str, str, dict]]):
+        if not items:
+            return
+        with self._lock:
+            self._init_table()
+            conn = db.get()
+            rows = []
+            for cid, text, meta in items:
+                self.remove_nolock(cid)
+                body = " ".join(tokenize(text))
+                rows.append((cid, body, self._meta_json(meta)))
+            conn.executemany(
+                "INSERT INTO kb_fts(cid,body,meta_json) VALUES(?,?,?)", rows)
+            conn.commit()
+            self._count += len(rows)
+
+    def remove_nolock(self, cid: str):
+        cur = db.get().execute("DELETE FROM kb_fts WHERE cid=?", (cid,))
+        if cur.rowcount > 0:
+            self._count -= cur.rowcount
 
     def remove(self, cid: str):
-        d = self.docs.pop(cid, None)
-        if not d:
-            return
-        self.total_len -= d["len"]
-        for w in d["tf"]:
-            self.df[w] -= 1
-            if self.df[w] <= 0:
-                del self.df[w]
-
-    @property
-    def avgdl(self) -> float:
-        return (self.total_len / len(self.docs)) if self.docs else 0.0
-
-    def _score(self, query_toks: list[str], d: dict) -> float:
-        score = 0.0
-        dl = d["len"] or 1
-        avgdl = self.avgdl or 1.0
-        for w in query_toks:
-            f = d["tf"].get(w, 0)
-            if not f:
-                continue
-            n = len(self.docs)
-            idf = math.log((n - self.df[w] + 0.5) / (self.df[w] + 0.5) + 1)
-            score += idf * f * (self.k1 + 1) / (
-                f + self.k1 * (1 - self.b + self.b * dl / avgdl)
-            )
-        return score
+        with self._lock:
+            self._init_table()
+            self.remove_nolock(cid)
+            db.get().commit()
 
     def search(self, query: str, top_k: int = 20) -> list[tuple[str, float, dict]]:
-        qtoks = tokenize(query)
-        if not qtoks or not self.docs:
+        self._init_table()
+        terms = sorted(set(tokenize(query)))
+        if not terms or self._count == 0:
             return []
-        scored = [(cid, self._score(qtoks, d), d["meta"])
-                  for cid, d in self.docs.items()]
-        scored = [x for x in scored if x[1] > 0]
-        scored.sort(key=lambda x: -x[1])
-        return [(cid, s, m) for cid, s, m in scored[:top_k]]
+        match = " OR ".join(f'"{t}"' for t in terms[:64])
+        try:
+            rows = db.get().execute(
+                "SELECT cid, bm25(kb_fts) AS rank, meta_json FROM kb_fts "
+                "WHERE kb_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match, top_k),
+            ).fetchall()
+        except Exception:
+            return []
+        out = []
+        for r in rows:
+            meta = json.loads(r["meta_json"])
+            # FTS5 bm25 越小越相关, 取负数让外部统一"分数越大越好"
+            score = -r["rank"] if r["rank"] < 0 else 0.0
+            out.append((r["cid"], score * 1000, meta))
+        return out
 
 
 INDEX = BM25Index()

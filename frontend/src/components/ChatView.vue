@@ -43,6 +43,13 @@
                @click="$emit('openDoc', s)">
               📄 {{ s.title }} <em>第{{ s.page }}页 · {{ Math.round(s.score * 100) }}%匹配</em>
             </a>
+            <details class="cite-details">
+              <summary>查看引用的原始段落</summary>
+              <div v-for="(s, si) in m.sources" :key="'t' + si" class="cite-item">
+                <b>《{{ s.title }}》第{{ s.page }}页</b>
+                <p>{{ s.text || '(未存片段)' }}</p>
+              </div>
+            </details>
           </div>
         </div>
       </div>

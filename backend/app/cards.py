@@ -2,11 +2,23 @@
 import json
 from pathlib import Path
 
-from . import db, ingest, parser
+from . import config, db, ingest, parser
 
-# 各掌握等级的复习间隔(天): box 0..5
-INTERVALS = [0, 1, 2, 4, 7, 15]
-MASTER_BOX = 4
+
+def _intervals() -> list[int]:
+    raw = str(config.get("FC_INTERVALS") or "0,1,2,4,7,15")
+    try:
+        arr = [max(0, int(x)) for x in raw.split(",") if x.strip() != ""]
+        return arr if arr else [0, 1, 2, 4, 7, 15]
+    except Exception:
+        return [0, 1, 2, 4, 7, 15]
+
+
+def _master_box() -> int:
+    try:
+        return max(1, int(config.get("FC_MASTER_BOX")))
+    except Exception:
+        return 4
 
 
 def ensure_table():
@@ -27,7 +39,9 @@ def ensure_table():
 
 
 def _due_after(row) -> float:
-    return (row["last_reviewed"] or 0) + INTERVALS[min(row["box"], 5)] * 86400
+    ivs = _intervals()
+    b = min(row["box"], len(ivs) - 1)
+    return (row["last_reviewed"] or 0) + ivs[b] * 86400
 
 
 def generate(doc_id: int, num: int = 10) -> int:
@@ -107,7 +121,7 @@ def answer(card_id: int, result: str):
         raise ValueError("卡片不存在")
     box = row["box"]
     if result == "correct":
-        box = min(box + 1, 5)
+        box = min(box + 1, len(_intervals()) - 1)
     elif result == "fuzzy":
         pass
     else:
@@ -134,7 +148,7 @@ def stats(kb_id: str | None = None) -> dict:
     ).fetchall()
     total = len(rows)
     due = len([r for r in rows if db.now() >= _due_after(r)])
-    mastered = len([r for r in rows if r["box"] >= MASTER_BOX])
+    mastered = len([r for r in rows if r["box"] >= _master_box()])
     reviews = sum(r["reviews"] for r in rows)
     wrongs = sum(r["wrongs"] for r in rows)
     acc = round((reviews - wrongs) / reviews * 100) if reviews else None
