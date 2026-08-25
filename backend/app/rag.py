@@ -22,7 +22,7 @@ def build_context(hits: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def chat_stream(question: str, kb_id: str = "default"):
+def chat_stream(question: str, kb_id: str = "default", session_id: str = ""):
     """流式RAG问答生成器: 先发sources事件, 再逐段delta, 最后done"""
     hits = search_with_threshold(question, kb_id)
 
@@ -30,8 +30,8 @@ def chat_stream(question: str, kb_id: str = "default"):
         yield {"type": "sources", "sources": []}
         text = "你的知识库里还没有找到相关内容，先上传一些资料吧。"
         yield {"type": "delta", "text": text}
-        save_chat("user", question, kb_id=kb_id)
-        save_chat("assistant", text, kb_id=kb_id)
+        save_chat("user", question, kb_id=kb_id, session_id=session_id)
+        save_chat("assistant", text, kb_id=kb_id, session_id=session_id)
         yield {"type": "done"}
         return
 
@@ -41,10 +41,15 @@ def chat_stream(question: str, kb_id: str = "default"):
                         "score": round(h["score"], 3)} for h in hits]}
 
     context = build_context(hits)
+    conds, args = ["kb_id=?"], [kb_id]
+    if session_id:
+        conds.append("session_id=?")
+        args.append(session_id)
     history = [
         {"role": r["role"], "content": r["content"]}
         for r in db.get().execute(
-            "SELECT role,content FROM chats WHERE kb_id=? ORDER BY id DESC LIMIT 6")
+            "SELECT role,content FROM chats WHERE " + " AND ".join(conds) +
+            " ORDER BY id DESC LIMIT 6", args)
     ][::-1]
     memories = [r["content"] for r in db.get().execute(
         "SELECT content FROM memories ORDER BY id DESC LIMIT 20")]
@@ -67,10 +72,11 @@ def chat_stream(question: str, kb_id: str = "default"):
         yield {"type": "delta", "text": piece}
 
     answer = "".join(full).strip() or "(AI未能给出有效回答，请重试)"
-    save_chat("user", question, kb_id=kb_id)
+    save_chat("user", question, kb_id=kb_id, session_id=session_id)
     save_chat("assistant", answer,
               [{"title": h["title"], "filename": h["filename"],
-                "page": h["page"]} for h in hits], kb_id=kb_id)
+                "page": h["page"]} for h in hits],
+              kb_id=kb_id, session_id=session_id)
     yield {"type": "done"}
 
 
@@ -118,10 +124,14 @@ def chat(question: str, kb_id: str = "default") -> dict:
 
 
 def save_chat(role: str, content: str, sources: list | None = None,
-              kb_id: str = "default"):
+              kb_id: str = "default", session_id: str = ""):
     db.get().execute(
-        "INSERT INTO chats(role,content,sources,created,kb_id) VALUES(?,?,?,?,?)",
+        "INSERT INTO chats(role,content,sources,created,kb_id,session_id)"
+        " VALUES(?,?,?,?,?,?)",
         (role, content, json.dumps(sources or [], ensure_ascii=False),
-         db.now(), kb_id),
+         db.now(), kb_id, session_id),
     )
+    if session_id:
+        db.get().execute("UPDATE sessions SET updated=? WHERE id=?",
+                         (db.now(), session_id))
     db.get().commit()

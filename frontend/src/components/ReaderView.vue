@@ -15,6 +15,11 @@
           第 <input class="jump" v-model.number="jumpTo" @keydown.enter="goPage(jumpTo)" /> / {{ pages.length }} 页
         </span>
         <button @click="nextPage" :disabled="idx >= pages.length - 1">下一页 ▶</button>
+        <template v-if="kind === 'pdf'">
+          <span class="sep"></span>
+          <button :class="{ on: viewMode === 'text' }" @click="viewMode = 'text'">文字</button>
+          <button :class="{ on: viewMode === 'original' }" @click="viewMode = 'original'; renderOriginal()">原版</button>
+        </template>
         <span class="sep"></span>
         <button @click="fontSize = Math.max(13, fontSize - 1)" title="缩小字体">A-</button>
         <button @click="fontSize = Math.min(26, fontSize + 1)" title="放大字体">A+</button>
@@ -22,6 +27,16 @@
 
       <div class="pages" ref="pagesBox" tabindex="0" @keydown="onKey">
         <div v-if="loadErr" class="load-err">{{ loadErr }}</div>
+
+        <template v-else-if="viewMode === 'original' && kind === 'pdf'">
+          <canvas id="pdf-canvas" class="pdf-canvas"></canvas>
+          <div v-if="rendering" class="rendering">渲染中…</div>
+        </template>
+
+        <template v-else-if="kind === 'image'">
+          <img :src="`/api/docs/${doc.id}/file`" class="img-view" />
+        </template>
+
         <div v-else-if="pages.length" class="page"
              :style="{ fontSize: fontSize + 'px' }"
              @mouseup="onSelect" @touchend="onSelect">
@@ -82,6 +97,11 @@ const jumpTo = ref(1)
 const fontSize = ref(16)
 const loadErr = ref("")
 const sourceUrl = ref("")
+const kind = ref("text")
+const viewMode = ref("text")
+const rendering = ref(false)
+let pdfDoc = null
+let renderTask = null
 
 const quicks = [
   { label: "📝 总结全文", question: "请总结这份文档的核心内容", scope: "all" },
@@ -98,6 +118,7 @@ async function load() {
     if (!res.ok) throw new Error(r.detail || "加载失败")
     pages.value = r.pages
     sourceUrl.value = r.source_url || ""
+    kind.value = r.kind || "text"
     jumpTo.value = pages.value[0]?.page ?? 1
   } catch (e) {
     loadErr.value = "原文加载失败: " + e.message + "（可能已被删除或丢失，请重新上传）"
@@ -105,17 +126,52 @@ async function load() {
 }
 load()
 
-function goPage(n) {
-  if (!n || n < 1 || n > pages.value.length) return
-  const target = pages.value.findIndex((p) => p.page === n)
-  if (target >= 0) {
-    idx.value = target
-    selection.value = ""
-    aiBox.value?.scrollTo?.(0, 0)
-  }
+async function goPage(n) {
+  const total = (viewMode.value === "original" && pdfDoc) ? pdfDoc.numPages : pages.value.length
+  if (!n || n < 1 || n > total) return
+  const tIdx = pages.value.findIndex((p) => p.page === n)
+  idx.value = tIdx >= 0 ? tIdx : Math.min(n - 1, total - 1)
+  selection.value = ""
+  jumpTo.value = n
+  if (viewMode.value === "original") await renderOriginal()
 }
-function prevPage() { goPage(pages.value[Math.max(0, idx.value - 1)].page) }
-function nextPage() { goPage(pages.value[Math.min(pages.value.length - 1, idx.value + 1)].page) }
+
+import * as pdfjsLib from "pdfjs-dist"
+import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url"
+pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
+
+async function ensurePdf() {
+  if (!pdfDoc) {
+    const task = pdfjsLib.getDocument({ url: `/api/docs/${props.doc.id}/file` })
+    pdfDoc = await task.promise
+  }
+  return pdfDoc
+}
+
+async function renderOriginal() {
+  if (kind.value !== "pdf") return
+  rendering.value = true
+  try {
+    await nextTick()
+    const pdf = await ensurePdf()
+    const pageNo = Math.min(pages.value[idx.value]?.page ?? 1, pdf.numPages)
+    const page = await pdf.getPage(pageNo)
+    const canvas = document.getElementById("pdf-canvas")
+    if (!canvas) return
+    const scale = 2.0
+    const viewport = page.getViewport({ scale })
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    if (renderTask) renderTask.cancel()
+    renderTask = page.render({ canvasContext: canvas.getContext("2d"), viewport })
+    await renderTask.promise
+  } catch (e) {
+    if (e?.name !== "RenderingCancelledException") console.error(e)
+  }
+  rendering.value = false
+}
+async function prevPage() { await goPage(pages.value[Math.max(0, idx.value - 1)].page) }
+async function nextPage() { await goPage(pages.value[Math.min(pages.value.length - 1, idx.value + 1)].page) }
 
 function onKey(e) {
   if (e.key === "ArrowLeft") prevPage()
@@ -211,6 +267,10 @@ function scroll() { nextTick(() => aiBox.value && (aiBox.value.scrollTop = aiBox
   padding: 7px 13px; cursor: pointer; font-size: 13.5px;
 }
 .tools button:hover:not(:disabled) { border-color: var(--accent); }
+.tools button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.pdf-canvas { max-width: 100%; margin: 0 auto; display: block; box-shadow: 0 3px 14px rgba(0,0,0,.35); border-radius: 8px; }
+.rendering { text-align: center; color: var(--muted); padding: 20px; }
+.img-view { max-width: 100%; max-height: 75vh; display: block; margin: 0 auto; border-radius: 10px; }
 .tools button:disabled { opacity: .35; cursor: default; }
 .page-ind { color: var(--muted); font-size: 13.5px; display: flex; align-items: center; gap: 5px; }
 .jump {

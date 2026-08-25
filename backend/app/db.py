@@ -73,6 +73,28 @@ def get() -> sqlite3.Connection:
             c2 = [r[1] for r in _conn.execute(f"PRAGMA table_info({tbl})")]
             if "kb_id" not in c2:
                 _conn.execute(f"ALTER TABLE {tbl} ADD COLUMN kb_id TEXT DEFAULT 'default'")
+        c3 = [r[1] for r in _conn.execute("PRAGMA table_info(chats)")]
+        if "session_id" not in c3:
+            _conn.execute("ALTER TABLE chats ADD COLUMN session_id TEXT DEFAULT ''")
+        _conn.execute(
+            """CREATE TABLE IF NOT EXISTS sessions(
+                id TEXT PRIMARY KEY, title TEXT,
+                kb_id TEXT DEFAULT 'default',
+                created REAL, updated REAL)"""
+        )
+        # 旧聊天记录归档到每库的"历史对话"会话
+        old = _conn.execute(
+            "SELECT DISTINCT kb_id FROM chats WHERE session_id=''").fetchall()
+        for r in old:
+            kbv = r["kb_id"] or "default"
+            sid = f"legacy_{kbv}"
+            _conn.execute(
+                "INSERT OR IGNORE INTO sessions(id,title,kb_id,created,updated)"
+                " VALUES(?,?,?,?,?)",
+                (sid, "历史对话", kbv, time.time(), time.time()),
+            )
+            _conn.execute("UPDATE chats SET session_id=? WHERE session_id='' AND kb_id=?",
+                          (sid, kbv))
         try:
             _conn.execute(
                 "CREATE TABLE IF NOT EXISTS kbs("

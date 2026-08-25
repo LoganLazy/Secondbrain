@@ -8,6 +8,7 @@
     "build": "vite build"
   },
   "dependencies": {
+    "pdfjs-dist": "^4.10.38",
     "vue": "^3.4.0"
   },
   "devDependencies": {

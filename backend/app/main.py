@@ -36,6 +36,7 @@ app.add_middleware(
 
 class QA(BaseModel):
     question: str
+    session_id: str = ""
 
 
 class SearchQ(BaseModel):
@@ -83,9 +84,18 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
 def doc_content(doc_id: int):
     try:
         row = db.get().execute(
-            "SELECT source_url FROM docs WHERE id=?", (doc_id,)).fetchone()
+            "SELECT source_url, file_path, filename FROM docs WHERE id=?",
+            (doc_id,)).fetchone()
+        fp_lower = (row["file_path"] or "").lower()
+        if fp_lower.endswith(".pdf"):
+            kind = "pdf"
+        elif fp_lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+            kind = "image"
+        else:
+            kind = "text"
         return {"code": 0, "pages": ingest.doc_pages(doc_id),
-                "source_url": row["source_url"] if row else None}
+                "source_url": row["source_url"] if row else None,
+                "kind": kind}
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -163,9 +173,16 @@ def chat_stream(request: Request, qa: QA):
     from fastapi.responses import StreamingResponse
 
     kb = KB(request)
+    sid = qa.session_id
 
     def gen():
-        for ev in rag.chat_stream(qa.question, kb_id=kb):
+        first_q = True
+        for ev in rag.chat_stream(qa.question, kb_id=kb, session_id=sid):
+            if ev["type"] == "delta" and first_q and sid:
+                db.get().execute(
+                    "UPDATE sessions SET title=? WHERE id=? AND title='新对话'",
+                    (qa.question[:20], sid))
+                first_q = False
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",
@@ -225,11 +242,14 @@ def auto_memory(question: str, answer: str):
 
 
 @app.get("/api/history")
-def history(request: Request, limit: int = 50):
+def history(request: Request, limit: int = 200, session_id: str = ""):
+    conds, args = ["kb_id=?"], [KB(request)]
+    if session_id:
+        conds.append("session_id=?"); args.append(session_id)
     rows = db.get().execute(
-        "SELECT role,content,sources,created FROM chats WHERE kb_id=?"
-        " ORDER BY id DESC LIMIT ?",
-        (KB(request), limit),
+        "SELECT role,content,sources,created FROM chats WHERE "
+        + " AND ".join(conds) + " ORDER BY id DESC LIMIT ?",
+        (*args, limit),
     ).fetchall()
     return [{**dict(r), "sources": json.loads(r["sources"])} for r in rows][::-1]
 
@@ -265,6 +285,65 @@ def stats(request: Request):
     ).fetchone()["c"]
     chunks = len(ingest._col.get(where={"kb_id": kb})["ids"])
     return {"docs": docs, "chunks": chunks}
+
+
+# ---------------- 会话 ----------------
+
+@app.get("/api/sessions")
+def list_sessions(request: Request):
+    kb = KB(request)
+    return [dict(r) for r in db.get().execute(
+        "SELECT * FROM sessions WHERE kb_id=? ORDER BY updated DESC", (kb,))]
+
+
+@app.post("/api/sessions")
+def create_session(request: Request, body: dict = None):
+    import random
+    kb = KB(request)
+    sid = "s_" + "".join(random.choices("0123456789abcdef", k=8))
+    title = ((body or {}).get("title") or "新对话").strip()[:30]
+    db.get().execute(
+        "INSERT INTO sessions(id,title,kb_id,created,updated) VALUES(?,?,?,?,?)",
+        (sid, title, kb, db.now(), db.now()))
+    db.get().commit()
+    return {"code": 0, "id": sid, "title": title}
+
+
+class RenameIn(BaseModel):
+    title: str
+
+
+@app.post("/api/sessions/{sid}/rename")
+def rename_session(sid: str, body: RenameIn):
+    t = body.title.strip()[:40]
+    if not t:
+        raise HTTPException(400, "标题不能为空")
+    db.get().execute("UPDATE sessions SET title=?, updated=? WHERE id=?",
+                     (t, db.now(), sid))
+    db.get().commit()
+    return {"code": 0}
+
+
+@app.delete("/api/sessions/{sid}")
+def delete_session(request: Request, sid: str):
+    kb = KB(request)
+    db.get().execute("DELETE FROM chats WHERE session_id=?", (sid,))
+    db.get().execute("DELETE FROM sessions WHERE id=? AND kb_id=?", (sid, kb))
+    db.get().commit()
+    return {"code": 0}
+
+
+@app.get("/api/docs/{doc_id}/file")
+def doc_file(doc_id: int):
+    from fastapi.responses import FileResponse
+    try:
+        row = ingest.get_doc(doc_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    fp = row["file_path"]
+    if not fp or not Path(fp).exists():
+        raise HTTPException(404, "原文件已丢失，请重新上传")
+    return FileResponse(fp, filename=row["filename"])
 
 
 # ---------------- 设置 ----------------
