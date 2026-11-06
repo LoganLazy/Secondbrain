@@ -15,7 +15,7 @@ class RagReliabilityTests(unittest.TestCase):
             CREATE TABLE chats(id INTEGER PRIMARY KEY, role TEXT, content TEXT,
                 sources TEXT, created REAL, kb_id TEXT, session_id TEXT);
             CREATE TABLE sessions(id TEXT, updated REAL);
-            CREATE TABLE memories(id INTEGER PRIMARY KEY, content TEXT);
+            CREATE TABLE memories(id INTEGER PRIMARY KEY, content TEXT, kb_id TEXT DEFAULT 'default');
         ''')
         self.hit = {'doc_id': 7, 'title': '手册', 'filename': 'manual.txt',
                     'page': 3, 'text': 'alpha original evidence', 'score': .85}
