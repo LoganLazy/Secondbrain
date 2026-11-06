@@ -10,7 +10,7 @@ _conn: sqlite3.Connection | None = None
 _lock = threading.Lock()
 
 
-def get() -> sqlite3.Connection:
+def _get_unlocked() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         _conn = sqlite3.connect(config.DATA_DIR / "memory.db", check_same_thread=False)
@@ -32,6 +32,18 @@ def get() -> sqlite3.Connection:
             CREATE TABLE IF NOT EXISTS memories(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT, created REAL
+            );
+            CREATE TABLE IF NOT EXISTS flashcards(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER,
+                q TEXT, a TEXT,
+                box INTEGER DEFAULT 0,
+                reviews INTEGER DEFAULT 0,
+                wrongs INTEGER DEFAULT 0,
+                last_result TEXT DEFAULT '',
+                last_reviewed REAL DEFAULT 0,
+                created REAL,
+                kb_id TEXT DEFAULT 'default'
             );
             """
         )
@@ -62,9 +74,15 @@ def get() -> sqlite3.Connection:
                     file_hash TEXT,
                     created REAL, file_path TEXT,
                     kb_id TEXT DEFAULT 'default',
+                    source_url TEXT,
                     UNIQUE(file_hash, kb_id)
                 );
-                INSERT INTO docs_new SELECT * FROM docs;
+                INSERT INTO docs_new(
+                    id,filename,title,category,tags,summary,chunks,file_hash,
+                    created,file_path,kb_id,source_url
+                ) SELECT
+                    id,filename,title,category,tags,summary,chunks,file_hash,
+                    created,file_path,kb_id,source_url FROM docs;
                 DROP TABLE docs;
                 ALTER TABLE docs_new RENAME TO docs;
                 """
@@ -76,6 +94,9 @@ def get() -> sqlite3.Connection:
         c3 = [r[1] for r in _conn.execute("PRAGMA table_info(chats)")]
         if "session_id" not in c3:
             _conn.execute("ALTER TABLE chats ADD COLUMN session_id TEXT DEFAULT ''")
+        card_columns = {r[1] for r in _conn.execute('PRAGMA table_info(flashcards)')}
+        if 'source_hash' not in card_columns:
+            _conn.execute("ALTER TABLE flashcards ADD COLUMN source_hash TEXT DEFAULT ''")
         _conn.execute(
             """CREATE TABLE IF NOT EXISTS sessions(
                 id TEXT PRIMARY KEY, title TEXT,
@@ -113,6 +134,12 @@ def get() -> sqlite3.Connection:
             pass
         _conn.commit()
     return _conn
+
+
+def get() -> sqlite3.Connection:
+    """Return the shared connection, serializing first-use schema migration."""
+    with _lock:
+        return _get_unlocked()
 
 
 def now() -> float:

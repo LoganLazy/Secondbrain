@@ -1,5 +1,5 @@
 {
-  "name": "secondbrain-desktop",
+  "name": "nebula-memory-desktop",
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
@@ -7,8 +7,8 @@
     "dist": "electron-builder --win dir"
   },
   "build": {
-    "appId": "com.loganlazy.secondbrain",
-    "productName": "SecondBrain",
+    "appId": "com.loganlazy.nebulamemory",
+    "productName": "Nebula Memory",
     "directories": {
       "output": "out"
     },

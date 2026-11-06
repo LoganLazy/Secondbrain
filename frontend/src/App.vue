@@ -4,9 +4,9 @@
     <template v-if="tab === 'reader' && reading">
       <ReaderView :doc="reading" @close="tab = 'library'; reading = null" />
     </template>
-    <ChatView v-else-if="tab === 'chat'" @openDoc="openReader" />
+    <ChatView v-else-if="tab === 'chat'" @openDoc="openReader" @switchTab="tab = $event" />
     <LibraryView v-else-if="tab === 'library'" @openDoc="openReader" @uploaded="sidebar && sidebar.load()" />
-    <FlashcardsView v-else-if="tab === 'cards'" />
+    <FlashcardsView v-else-if="tab === 'cards'" @openDoc="openReader" />
     <SettingsView v-else-if="tab === 'settings'" />
     <MemoryView v-else />
   </main>
@@ -35,7 +35,8 @@ function openReader(s) {
   reading.value = {
     id: s.doc_id ?? s.id,
     title: s.title,
-    filename: s.filename
+    filename: s.filename,
+    page: s.page
   }
   tab.value = "reader"
 }

@@ -92,7 +92,8 @@ class BM25Index:
             self.remove_nolock(cid)
             db.get().commit()
 
-    def search(self, query: str, top_k: int = 20) -> list[tuple[str, float, dict]]:
+    def search(self, query: str, top_k: int = 20,
+               kb_id: str | None = None) -> list[tuple[str, float, dict]]:
         self._init_table()
         terms = sorted(set(tokenize(query)))
         if not terms or self._count == 0:
@@ -101,8 +102,11 @@ class BM25Index:
         try:
             rows = db.get().execute(
                 "SELECT cid, bm25(kb_fts) AS rank, meta_json FROM kb_fts "
-                "WHERE kb_fts MATCH ? ORDER BY rank LIMIT ?",
-                (match, top_k),
+                "WHERE kb_fts MATCH ?"
+                + (" AND COALESCE(json_extract(meta_json, '$.kb_id'), 'default')=?"
+                   if kb_id is not None else "")
+                + " ORDER BY rank LIMIT ?",
+                (match, kb_id, top_k) if kb_id is not None else (match, top_k),
             ).fetchall()
         except Exception:
             return []

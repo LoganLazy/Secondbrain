@@ -2,21 +2,63 @@
 import hashlib
 import json
 import re
+import sys
 import threading
 import time
 import shutil
 import tempfile
+import os
+import uuid
+from typing import Literal
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from urllib.parse import urljoin
 
-from . import config, db, ingest, rag
+from . import config, db
+from .lifecycle import acquire_service_lease, serialized, MUTATION_LOCK
+from .restore import activate_pending, preview_restore, queue_restore, restore_status, pending_path, cancel_restore, write_json
+
+acquire_service_lease()
+activate_pending()
+from . import ingest, rag
 from . import cards as cards_mod
+from .security import copy_limited, safe_upload_name, validate_public_url
 
-app = FastAPI(title="SecondBrain")
+app = FastAPI(title="Nebula Memory")
+_jobs = None
+_jobs_lock = threading.Lock()
+_admission_lock = threading.RLock()
+
+
+def import_jobs():
+    global _jobs
+    with _jobs_lock:
+        if _jobs is None:
+            from .import_jobs import ImportJobs
+            _jobs = ImportJobs()
+        return _jobs
+
+
+def require_import_ready():
+    if pending_path().exists():
+        raise HTTPException(409, '已有等待重启的恢复任务，请先重启知识库服务')
+
+
+def import_kb(request):
+    kb_id = KB(request)
+    if request.headers.get('x-kb-id', 'default') != kb_id:
+        raise HTTPException(404, '知识库已不存在')
+    return kb_id
+
+
+def require_local_origin(request):
+    origin = request.headers.get('origin')
+    if origin and origin != str(request.base_url).rstrip('/'):
+        raise HTTPException(403, '请从本机知识库页面执行此操作')
 
 
 def log(msg: str):
@@ -24,26 +66,68 @@ def log(msg: str):
 
 
 def KB(request) -> str:
-    """从请求头解析知识库ID, 非法则回退默认库"""
+    """解析知识库；失效的显式选择不能悄悄回退到默认库。"""
     kb = request.headers.get("x-kb-id", "default")
     if kb != "default":
         row = db.get().execute("SELECT id FROM kbs WHERE id=?", (kb,)).fetchone()
         if not row:
-            return "default"
+            raise HTTPException(404, "知识库已不存在，请重新选择")
     return kb
+
+
+def ensure_session(kb_id: str, session_id: str) -> None:
+    """Reject a missing or cross-knowledge-base conversation session."""
+    if session_id and not db.get().execute(
+            "SELECT 1 FROM sessions WHERE id=? AND kb_id=?",
+            (session_id, kb_id)).fetchone():
+        raise HTTPException(404, "对话会话不存在")
+
+
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    TrustedHostMiddleware,
+    allowed_hosts=["127.0.0.1", "localhost", "testserver"],
 )
 
 
+@app.middleware('http')
+async def protect_mutations(request: Request, call_next):
+    if request.method in ('POST', 'PATCH', 'PUT', 'DELETE'):
+        origin = request.headers.get('origin')
+        if origin and origin != str(request.base_url).rstrip('/'):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({'detail':'请从本机知识库页面执行此操作'}, status_code=403)
+    return await call_next(request)
+
+
+_INSTANCE_ID = os.environ.get('NEBULA_MEMORY_INSTANCE_ID') or uuid.uuid4().hex
+
+
+@app.get('/api/health')
+def health():
+    from fastapi.responses import JSONResponse
+    try:
+        db.get().execute('SELECT 1').fetchone()
+        return {'product':'Nebula Memory', 'status':'ok', 'instance':_INSTANCE_ID}
+    except Exception:
+        return JSONResponse({'product':'Nebula Memory', 'status':'unavailable'}, status_code=503)
+
+
 class QA(BaseModel):
-    question: str
-    session_id: str = ""
+    question: str = Field(min_length=1, max_length=8000)
+    session_id: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9_-]*$")
 
 
 class SearchQ(BaseModel):
-    query: str
-    k: int | None = None
+    query: str = Field(min_length=1, max_length=1000)
+    k: int | None = Field(default=None, ge=1, le=30)
+    mode: Literal['hybrid', 'keyword'] = 'hybrid'
+
+
+class DocumentPatch(BaseModel):
+    model_config = {'extra': 'forbid'}
+    title: str = Field(default='', max_length=160)
+    category: str = Field(default='', max_length=80)
+    tags: list[str] = Field(default_factory=list, max_length=20)
 
 
 class MemoryIn(BaseModel):
@@ -53,43 +137,98 @@ class MemoryIn(BaseModel):
 @app.post("/api/upload")
 async def upload(request: Request, files: list[UploadFile] = File(...)):
     """支持多文件上传, 返回每个文件的结果"""
+    require_import_ready()
     results = []
     for file in files:
-        suffix = Path(file.filename).suffix.lower()
+        try:
+            filename = safe_upload_name(file.filename)
+        except ValueError as e:
+            results.append({"file": file.filename or "", "ok": False, "msg": str(e)})
+            continue
+        suffix = Path(filename).suffix.lower()
         if suffix not in (".pdf", ".docx", ".txt", ".md",
                           ".jpg", ".jpeg", ".png", ".webp", ".bmp"):
-            results.append({"file": file.filename, "ok": False,
+            results.append({"file": filename, "ok": False,
                             "msg": f"暂不支持 {suffix} 格式"})
             continue
         kb_dir = config.UPLOAD_DIR / KB(request)
         kb_dir.mkdir(parents=True, exist_ok=True)
-        fh_tmp = hashlib.md5(file.filename.encode()).hexdigest()[:8]
-        dest = kb_dir / f"{fh_tmp}_{file.filename}"
-        with open(dest, "wb") as out:
-            shutil.copyfileobj(file.file, out)
+        fh_tmp = uuid.uuid4().hex
+        dest = kb_dir / f"{fh_tmp}_{filename}"
         try:
-            info = ingest.ingest(dest, display_name=file.filename,
+            copy_limited(file.file, dest)
+            info = ingest.ingest(dest, display_name=filename,
                                  keep_path=dest, kb_id=KB(request))
-            results.append({"file": file.filename, "ok": True,
+            results.append({"file": filename, "ok": True,
                             "title": info["title"], "id": info["id"]})
         except ValueError as e:
             # 注意: "文档已存在"时不能删除dest, 它可能就是库里已有文档的原文!
             if "已存在" not in str(e):
                 dest.unlink(missing_ok=True)
-            results.append({"file": file.filename, "ok": False, "msg": str(e)})
+            results.append({"file": filename, "ok": False, "msg": str(e)})
         except Exception as e:
             dest.unlink(missing_ok=True)
-            results.append({"file": file.filename, "ok": False,
+            results.append({"file": filename, "ok": False,
                             "msg": f"处理失败: {e}"})
     return {"code": 0, "results": results}
 
 
+@app.post('/api/import/jobs')
+def create_import_job(request: Request, files: list[UploadFile] = File(...)):
+    require_local_origin(request)
+    require_import_ready()
+    if len(files) > 50:
+        raise HTTPException(413, '每次最多选择 50 个文件')
+    kb_id = import_kb(request)
+    items, rejected = [], []
+    remaining = 500 * 1024 * 1024
+    for file in files:
+        dest = None
+        try:
+            filename = safe_upload_name(file.filename)
+            if Path(filename).suffix.lower() not in ('.pdf', '.docx', '.txt', '.md', '.jpg', '.jpeg', '.png', '.webp', '.bmp'):
+                raise ValueError('不支持的文档格式')
+            folder = config.UPLOAD_DIR / kb_id
+            folder.mkdir(parents=True, exist_ok=True)
+            dest = folder / f'{uuid.uuid4().hex}_{filename}'
+            size = copy_limited(file.file, dest, min(100 * 1024 * 1024, remaining))
+            remaining -= size
+            items.append({'file': filename, 'path': str(dest)})
+        except Exception as exc:
+            if dest is not None:
+                dest.unlink(missing_ok=True)
+            rejected.append({'file': file.filename or '', 'ok': False, 'msg': str(exc)})
+    with _admission_lock:
+        require_import_ready()
+        job = import_jobs().create(kb_id, items) if items else None
+    return {'code': 0, 'job': job, 'results': rejected}
+
+
+@app.get('/api/import/jobs')
+def list_import_jobs(request: Request):
+    return {'jobs': import_jobs().list(import_kb(request))}
+
+
+@app.post('/api/import/jobs/{job_id}/{action}')
+def control_import_job(request: Request, job_id: str, action: str):
+    require_local_origin(request)
+    try:
+        with _admission_lock:
+            if action != 'stop':
+                require_import_ready()
+            return {'job': import_jobs().control(job_id, import_kb(request), action)}
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
 @app.get("/api/docs/{doc_id}/content")
-def doc_content(doc_id: int):
+def doc_content(request: Request, doc_id: int):
     try:
         row = db.get().execute(
-            "SELECT source_url, file_path, filename FROM docs WHERE id=?",
-            (doc_id,)).fetchone()
+            "SELECT source_url, file_path, filename, file_hash FROM docs WHERE id=? AND kb_id=?",
+            (doc_id, KB(request))).fetchone()
+        if not row:
+            raise ValueError("文档不存在")
         fp_lower = (row["file_path"] or "").lower()
         if fp_lower.endswith(".pdf"):
             kind = "pdf"
@@ -99,41 +238,36 @@ def doc_content(doc_id: int):
             kind = "text"
         return {"code": 0, "pages": ingest.doc_pages(doc_id),
                 "source_url": row["source_url"] if row else None,
-                "kind": kind}
+                "kind": kind, "revision": row['file_hash'] or ''}
     except ValueError as e:
         raise HTTPException(404, str(e))
 
 
 class AssistIn(BaseModel):
-    question: str
-    passage: str = ""
-    title: str = ""
-    page: int | None = None
+    doc_id: int = Field(gt=0)
+    question: str = Field(min_length=1, max_length=8000)
+    scope: Literal['document', 'page', 'selection'] = 'page'
+    passage: str = Field(default='', max_length=4000)
+    page: int | None = Field(default=None, ge=1)
 
 
 @app.post("/api/assist")
-def assist(a: AssistIn):
-    """阅读助手: 基于指定段落/全文回答, 不走知识库检索"""
-    sys_prompt = (
-        "You are SecondBrain's reading assistant. 回答语言与用户提问语言一致。用户正在阅读自己的文档"
-        + (f"《{a.title}》第{a.page}页" if a.page else f"《{a.title}》" if a.title else "")
-        + "。用简洁中文回答；若提供了文档片段，答案必须基于片段内容。"
-    )
-    user = a.question
-    if a.passage:
-        user = f"文档片段:\n{a.passage[:6000]}\n\n问题: {a.question}"
-    messages = [{"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user}]
+def assist(request: Request, a: AssistIn):
+    """核验文档归属及范围后，从服务器原文构造上下文，不信任客户端全文。"""
+    from . import reader
     try:
-        return {"code": 0, "answer": ingest.call_chat(messages, temperature=0.4)}
-    except Exception as e:
-        raise HTTPException(500, f"AI调用失败: {e}")
+        prepared = reader.prepare(a.doc_id, KB(request), a.scope, a.page, a.passage)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return reader.answer(a.question, prepared)
 
 
 @app.get("/api/docs")
 def list_docs(request: Request):
     rows = db.get().execute(
-        "SELECT id,filename,title,category,tags,summary,chunks,created,"
+        "SELECT id,filename,title,category,tags,summary,chunks,created,file_hash AS revision,"
         "(file_path IS NOT NULL AND file_path!='') AS has_file, source_url"
         " FROM docs WHERE kb_id=? ORDER BY id DESC", (KB(request),)
     ).fetchall()
@@ -143,8 +277,12 @@ def list_docs(request: Request):
 
 
 @app.delete("/api/docs/{doc_id}")
-def delete_doc(doc_id: int):
+def delete_doc(request: Request, doc_id: int):
     try:
+        if not db.get().execute(
+                "SELECT 1 FROM docs WHERE id=? AND kb_id=?",
+                (doc_id, KB(request))).fetchone():
+            raise ValueError("文档不存在")
         ingest.delete_doc(doc_id)
         return {"code": 0}
     except ValueError as e:
@@ -153,23 +291,51 @@ def delete_doc(doc_id: int):
 
 @app.post("/api/search")
 def search(request: Request, q: SearchQ):
-    hits = ingest.search(q.query, q.k, kb_id=KB(request))
-    return [
-        {"title": h["title"], "filename": h["filename"], "page": h["page"],
+    return search_details(request, q)['hits']
+
+
+@app.post('/api/search/details')
+def search_details(request: Request, q: SearchQ):
+    if not q.query.strip():
+        raise HTTPException(400, '请输入搜索词')
+    diagnostics = {}
+    hits = ingest.search(q.query.strip(), q.k, kb_id=KB(request),
+                         diagnostics=diagnostics, mode=q.mode)
+    items = [
+        {"doc_id": h["doc_id"], "title": h["title"], "filename": h["filename"], "page": h["page"],
          "text": h["text"], "score": round(h["score"], 3),
+         'revision': h.get('revision', ''),
          "semantic": round(h.get("vn", 0), 3), "keyword": round(h.get("kw", 0), 3)}
         for h in hits
     ]
+    return {'hits': items, 'query': q.query.strip(), **diagnostics}
+
+
+@app.patch('/api/docs/{doc_id}')
+def update_document(request: Request, doc_id: int, value: DocumentPatch):
+    from . import documents
+    require_local_origin(request)
+    try:
+        return documents.update(doc_id, KB(request), value.model_dump(exclude_unset=True))
+    except BlockingIOError as exc:
+        raise HTTPException(409, str(exc))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.post("/api/chat")
 def chat(request: Request, qa: QA):
-    result = rag.chat(qa.question, kb_id=KB(request))
+    kb = KB(request)
+    ensure_session(kb, qa.session_id)
+    result = rag.chat(qa.question, kb_id=kb, session_id=qa.session_id)
     # 后台自动提取长期记忆, 不阻塞回答
-    threading.Thread(
-        target=auto_memory, args=(qa.question, result.get("answer", "")),
-        daemon=True,
-    ).start()
+    if result.get("mode") == "generated":
+        threading.Thread(
+            target=auto_memory, args=(qa.question, result.get("answer", "")),
+            daemon=True,
+        ).start()
     return result
 
 
@@ -179,6 +345,7 @@ def chat_stream(request: Request, qa: QA):
 
     kb = KB(request)
     sid = qa.session_id
+    ensure_session(kb, sid)
 
     def gen():
         first_q = True
@@ -250,9 +417,9 @@ def auto_memory(question: str, answer: str):
 
 @app.get("/api/history")
 def history(request: Request, limit: int = 200, session_id: str = ""):
-    conds, args = ["kb_id=?"], [KB(request)]
-    if session_id:
-        conds.append("session_id=?"); args.append(session_id)
+    ensure_session(KB(request), session_id)
+    conds, args = ["kb_id=?", "session_id=?"], [KB(request), session_id]
+    limit = max(1, min(limit, 500))
     rows = db.get().execute(
         "SELECT role,content,sources,created FROM chats WHERE "
         + " AND ".join(conds) + " ORDER BY id DESC LIMIT ?",
@@ -318,10 +485,88 @@ def stats(request: Request):
             "db_size_mb": _dir_size_mb(config.DATA_DIR),
             "search_ms": lat["total"] if lat else None,
             "local_ms": lat["local"] if lat else None,
-            "perf_estimate": est}
+            "perf_estimate": est,
+            "vector": ingest.vector_health()}
+
+
+@app.post("/api/index/rebuild")
+def rebuild_index():
+    require_import_ready()
+    try:
+        result = ingest.rebuild_vector_index()
+        report = config.DATA_DIR / 'restore-report.json'
+        if report.exists():
+            info = json.loads(report.read_text(encoding='utf-8'))
+            info['needs_rebuild'] = False
+            write_json(report, info)
+        return {"code": 0, **result}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except Exception:
+        raise HTTPException(500, '重建未完成，请检查原文、模型配置和服务日志；不要删除备份或原始资料')
+
+
+@app.get("/api/backup")
+def download_backup():
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+    from .backup import cleanup_backup, create_backup
+
+    archive = create_backup()
+    import zipfile
+    with zipfile.ZipFile(archive) as zipped:
+        missing_count = len(json.loads(zipped.read('Nebula-Memory/backup-manifest.json')).get('missing_originals', []))
+    return FileResponse(
+        archive,
+        media_type="application/zip",
+        filename=archive.name,
+        headers={'X-Backup-Missing-Originals': str(missing_count)},
+        background=BackgroundTask(cleanup_backup, archive),
+    )
 
 
 # ---------------- 会话 ----------------
+@app.post('/api/backup/preview')
+def restore_preview(request: Request, file: UploadFile = File(...)):
+    require_local_origin(request)
+    try:
+        return preview_restore(file.file)
+    except Exception as exc:
+        raise HTTPException(400, f'备份无法恢复：{exc}')
+
+
+class RestoreConfirm(BaseModel):
+    preview_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    restore_settings: bool = False
+    confirm: Literal[True]
+
+
+@app.post('/api/backup/restore')
+def restore_confirm(request: Request, value: RestoreConfirm):
+    require_local_origin(request)
+    with _admission_lock:
+        if import_jobs().active():
+            raise HTTPException(409, '请先完成或停止文档导入任务')
+        with MUTATION_LOCK:
+            if import_jobs().active():
+                raise HTTPException(409, '请先完成或停止文档导入任务')
+            try:
+                return queue_restore(value.preview_id, value.restore_settings)
+            except Exception as exc:
+                raise HTTPException(409, str(exc))
+
+
+@app.get('/api/backup/restore-status')
+def backup_restore_status():
+    return restore_status()
+
+
+@app.post('/api/backup/restore-cancel')
+def backup_restore_cancel(request: Request):
+    require_local_origin(request)
+    return cancel_restore()
+
+
 
 @app.get("/api/sessions")
 def list_sessions(request: Request):
@@ -348,12 +593,15 @@ class RenameIn(BaseModel):
 
 
 @app.post("/api/sessions/{sid}/rename")
-def rename_session(sid: str, body: RenameIn):
+def rename_session(request: Request, sid: str, body: RenameIn):
     t = body.title.strip()[:40]
     if not t:
         raise HTTPException(400, "标题不能为空")
-    db.get().execute("UPDATE sessions SET title=?, updated=? WHERE id=?",
-                     (t, db.now(), sid))
+    cur = db.get().execute(
+        "UPDATE sessions SET title=?, updated=? WHERE id=? AND kb_id=?",
+        (t, db.now(), sid, KB(request)))
+    if not cur.rowcount:
+        raise HTTPException(404, "对话会话不存在")
     db.get().commit()
     return {"code": 0}
 
@@ -361,19 +609,21 @@ def rename_session(sid: str, body: RenameIn):
 @app.delete("/api/sessions/{sid}")
 def delete_session(request: Request, sid: str):
     kb = KB(request)
-    db.get().execute("DELETE FROM chats WHERE session_id=?", (sid,))
+    db.get().execute("DELETE FROM chats WHERE session_id=? AND kb_id=?", (sid, kb))
     db.get().execute("DELETE FROM sessions WHERE id=? AND kb_id=?", (sid, kb))
     db.get().commit()
     return {"code": 0}
 
 
 @app.get("/api/docs/{doc_id}/file")
-def doc_file(doc_id: int):
+def doc_file(request: Request, doc_id: int):
     from fastapi.responses import FileResponse
     try:
         row = ingest.get_doc(doc_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    if (row["kb_id"] or "default") != KB(request):
+        raise HTTPException(404, "文档不存在")
     fp = row["file_path"]
     if not fp or not Path(fp).exists():
         raise HTTPException(404, "原文件已丢失，请重新上传")
@@ -385,12 +635,12 @@ def doc_file(doc_id: int):
 @app.get("/api/config")
 def get_config():
     out = {}
-    for k in ("CHAT_BASE_URL", "CHAT_MODEL", "EMBED_BASE_URL",
-              "EMBED_MODEL", "EMBED_PROVIDER"):
+    for k in config.DEFAULTS:
         out[k] = config.get(k)
     for k in config.SECRET_KEYS:
         v = config.get(k) or ""
-        out[k] = {"set": bool(v), "preview": (v[:6] + "…" + v[-4:]) if len(v) > 12 else ("已设置" if v else "")}
+        out[k] = {"set": bool(v)}
+    out['warnings'] = config.WARNINGS
     out["LABELS"] = config.LABELS
     from . import ocr
     out["ocr_available"] = ocr.available()
@@ -398,16 +648,20 @@ def get_config():
 
 
 class ConfigIn(BaseModel):
+    model_config = {'extra':'forbid'}
     patch: dict
 
 
 @app.post("/api/config")
 def set_config(c: ConfigIn):
-    allowed = {"CHAT_BASE_URL", "CHAT_MODEL", "EMBED_BASE_URL", "EMBED_MODEL",
-               "EMBED_PROVIDER", "DEEPSEEK_KEY", "ZHIPU_KEY",
-               "NET_MODE", "FC_INTERVALS", "FC_MASTER_BOX"}
-    patch = {k: str(v).strip() for k, v in c.patch.items() if k in allowed}
-    config.save(patch)
+    try:
+        config.save(c.patch)
+    except BlockingIOError as exc:
+        raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except OSError:
+        raise HTTPException(500, '配置写入失败，原配置已保留，请检查目录权限和磁盘空间')
     return {"code": 0}
 
 
@@ -417,10 +671,17 @@ def test_config(c: ConfigIn):
 
     t = c.patch.get("type")
     try:
+        draft = config.validate_patch({key:value for key,value in c.patch.items() if key != 'type'})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    effective = {**config.SETTINGS, **{key:value for key,value in draft.items() if key not in config.SECRET_KEYS or value}}
+    if t not in ('chat', 'embed'):
+        raise HTTPException(400, 'type 必须是 chat 或 embed')
+    if effective['NET_MODE'] == 'offline':
+        return {'code':1, 'msg':'当前草稿为离线模式，不会发起在线连接测试；切换模式后可测试，测试不会保存配置。'}
+    try:
         if t == "chat":
-            base = str(c.patch.get("CHAT_BASE_URL") or config.get("CHAT_BASE_URL")).rstrip("/")
-            key = c.patch.get("DEEPSEEK_KEY") or config.get("DEEPSEEK_KEY")
-            model = c.patch.get("CHAT_MODEL") or config.get("CHAT_MODEL")
+            base, key, model = (effective[name] for name in ('CHAT_BASE_URL', 'DEEPSEEK_KEY', 'CHAT_MODEL'))
             r = httpx.post(f"{base}/chat/completions",
                            headers={"Authorization": f"Bearer {key}"},
                            json={"model": model, "messages": [{"role": "user", "content": "hi"}],
@@ -428,9 +689,7 @@ def test_config(c: ConfigIn):
             r.raise_for_status()
             return {"code": 0, "msg": f"对话模型连通 ✓ ({model})"}
         if t == "embed":
-            base = str(c.patch.get("EMBED_BASE_URL") or config.get("EMBED_BASE_URL")).rstrip("/")
-            key = c.patch.get("ZHIPU_KEY") or config.get("ZHIPU_KEY")
-            model = c.patch.get("EMBED_MODEL") or config.get("EMBED_MODEL")
+            base, key, model = (effective[name] for name in ('EMBED_BASE_URL', 'ZHIPU_KEY', 'EMBED_MODEL'))
             r = httpx.post(f"{base}/embeddings",
                            headers={"Authorization": f"Bearer {key}"},
                            json={"model": model, "input": ["测试"]}, timeout=30)
@@ -440,8 +699,8 @@ def test_config(c: ConfigIn):
         raise HTTPException(400, "type 必须是 chat 或 embed")
     except HTTPException:
         raise
-    except Exception as e:
-        return {"code": 1, "msg": f"连接失败: {e}"}
+    except Exception:
+        return {"code": 1, "msg": "连接失败，请检查接口地址、模型、密钥和网络；未修改已保存配置。"}
 
 
 # ---------------- 多知识库 ----------------
@@ -475,6 +734,8 @@ def create_kb(body: dict):
 
 @app.delete("/api/kbs/{kb_id}")
 def delete_kb(kb_id: str):
+    if import_jobs().active():
+        raise HTTPException(409, '请先完成或停止导入任务后删除知识库')
     if kb_id == "default":
         raise HTTPException(400, "默认知识库不能删除")
     # 删文档(含向量/关键词索引/原文件)
@@ -504,13 +765,23 @@ def _extract_web(url: str) -> tuple[str, str]:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                              "AppleWebKit/537.36 (KHTML, like Gecko) "
                              "Chrome/120.0 Safari/537.36"}
-    r = _hx.get(url, headers=headers, timeout=25, follow_redirects=True)
+    current = validate_public_url(url)
+    for _ in range(6):
+        r = _hx.get(current, headers=headers, timeout=25, follow_redirects=False)
+        if r.status_code not in (301, 302, 303, 307, 308):
+            break
+        location = r.headers.get("location")
+        if not location:
+            break
+        current = validate_public_url(urljoin(current, location))
+    else:
+        raise ValueError("网页重定向次数过多")
     r.raise_for_status()
     html = r.text
     if len(html) > 3_000_000:
         raise ValueError("页面过大")
     text = trafilatura.extract(html, include_comments=False,
-                               favor_recall=True, url=url)
+                               favor_recall=True, url=current)
     if not text or len(text.strip()) < 80:
         raise ValueError("提取不到正文(可能是登录墙、JS动态页或非文章类页面)")
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
@@ -549,7 +820,9 @@ def import_links(request: Request, body: LinksIn):
             content = (f"# {title}\n\n> 来源: {url}\n"
                        f"> 抓取时间: {time.strftime('%Y-%m-%d %H:%M')}\n\n{text}")
             safe = re.sub(r"[^\w\u4e00-\u9fff-]", "_", title)[:40] or "web"
-            dest = config.UPLOAD_DIR / f"web_{hashlib.md5(url.encode()).hexdigest()[:8]}_{safe}.md"
+            kb_dir = config.UPLOAD_DIR / kb
+            kb_dir.mkdir(parents=True, exist_ok=True)
+            dest = kb_dir / f"web_{hashlib.md5(url.encode()).hexdigest()[:8]}_{safe}.md"
             dest.write_text(content, encoding="utf-8")
             info = ingest.ingest(dest, display_name=title, keep_path=dest, kb_id=kb)
             db.get().execute("UPDATE docs SET source_url=? WHERE id=?",
@@ -571,10 +844,11 @@ def import_links(request: Request, body: LinksIn):
 _importing_lock = threading.Lock()
 
 
+@serialized
 def scan_inbox():
     """扫描 知识库文件夹/, 每个知识库一个同名子文件夹.
     丢进哪个文件夹就导入哪个库; 根目录散落文件归入默认库."""
-    if not _importing_lock.acquire(blocking=False):
+    if pending_path().exists() or not _importing_lock.acquire(blocking=False):
         return
     try:
         # 为每个库准备同名收件夹
@@ -592,10 +866,10 @@ def scan_inbox():
             if f.is_file():
                 target = config.UPLOAD_DIR / "default"
                 target.mkdir(parents=True, exist_ok=True)
-                moved = target / f.name
+                moved = target / f'{uuid.uuid4().hex}_{f.name}'
                 shutil.move(str(f), str(moved))
                 folders.insert(0, (str(target), "default"))
-                _ingest_one(moved, "default")
+                import_jobs().create('default', [{'path': str(moved), 'file': f.name}])
                 folders.pop(0)
 
         for path_str, kb_id in folders:
@@ -620,12 +894,17 @@ def _import_file(f: Path, kb_id: str, done_dir: Path, fail_dir: Path):
     stamp = _time.strftime("%H%M%S")
     try:
         info = ingest.ingest(f, display_name=f.name, keep_path=f, kb_id=kb_id)
-        dest = done_dir / f"{stamp}_{f.name}"
+        dest = done_dir / f"{stamp}_{uuid.uuid4().hex[:8]}_{f.name}"
         shutil.move(str(f), str(dest))
+        db.get().execute('UPDATE docs SET file_path=? WHERE id=?', (str(dest), info['id']))
+        db.get().commit()
         log(f"[自动导入] 成功({kb_id}): {f.name} -> 《{info['title']}》")
     except ValueError as e:
         if "已存在" in str(e) or "已有此文档" in str(e):
-            shutil.move(str(f), str(done_dir / f"{stamp}_{f.name}"))
+            dest = done_dir / f"{stamp}_{uuid.uuid4().hex[:8]}_{f.name}"
+            shutil.move(str(f), str(dest))
+            db.get().execute('UPDATE docs SET file_path=? WHERE file_path=?', (str(dest), str(f)))
+            db.get().commit()
             log(f"[自动导入] 跳过重复({kb_id}): {f.name}")
         else:
             shutil.move(str(f), str(fail_dir / f"{stamp}_{f.name}"))
@@ -674,25 +953,32 @@ def inbox_loop():
         time.sleep(60)
 
 
-threading.Thread(target=inbox_loop, daemon=True).start()
+if os.environ.get('NEBULA_DISABLE_INBOX') != '1':
+    threading.Thread(target=inbox_loop, daemon=True).start()
 
 
 # ---------------- 闪卡 ----------------
 
 class GenIn(BaseModel):
-    doc_id: int
-    num: int = 10
+    doc_id: int = Field(gt=0)
+    num: int = Field(default=10, ge=1, le=20)
 
 
 @app.post("/api/flashcards/generate")
-def fc_generate(q: GenIn):
+def fc_generate(request: Request, q: GenIn):
     try:
-        n = cards_mod.generate(q.doc_id, q.num)
+        if not db.get().execute(
+                "SELECT 1 FROM docs WHERE id=? AND kb_id=?",
+                (q.doc_id, KB(request))).fetchone():
+            raise ValueError("文档不存在")
+        n = cards_mod.generate(q.doc_id, q.num, KB(request))
         return {"code": 0, "count": n}
+    except (cards_mod.CardConflict, BlockingIOError) as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"出题失败: {e}")
+    except Exception:
+        raise HTTPException(502, '出题未完成，请检查网络、离线模式或模型配置；已有卡片不受影响')
 
 
 @app.get("/api/flashcards")
@@ -701,29 +987,37 @@ def fc_list(request: Request, doc_id: int | None = None):
 
 
 @app.get("/api/flashcards/due")
-def fc_due(request: Request):
-    return cards_mod.due_queue(KB(request))
+def fc_due(request: Request, doc_id: int | None = None):
+    return cards_mod.due_queue(KB(request), doc_id)
 
 
 class AnswerIn(BaseModel):
-    result: str
+    result: Literal['correct', 'fuzzy', 'wrong']
+    expected_reviews: int = Field(ge=0, strict=True)
 
 
 @app.post("/api/flashcards/{card_id}/answer")
-def fc_answer(card_id: int, a: AnswerIn):
+def fc_answer(request: Request, card_id: int, a: AnswerIn):
     if a.result not in ("correct", "fuzzy", "wrong"):
         raise HTTPException(400, "result 必须是 correct/fuzzy/wrong")
     try:
-        cards_mod.answer(card_id, a.result)
-        return {"code": 0}
+        result = cards_mod.answer(card_id, a.result, KB(request), a.expected_reviews)
+        return {"code": 0, **result}
+    except (cards_mod.CardConflict, BlockingIOError) as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
 
 
 @app.delete("/api/flashcards/{card_id}")
-def fc_delete(card_id: int):
-    cards_mod.delete(card_id)
-    return {"code": 0}
+def fc_delete(request: Request, card_id: int):
+    try:
+        cards_mod.delete(card_id, KB(request))
+        return {"code": 0}
+    except BlockingIOError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/flashcards/stats")

@@ -1,12 +1,12 @@
 <template>
   <div class="chat">
     <div class="sess-bar">
-      <button class="sb-new" @click="newSession">{{ L("sess_new") }}</button>
-      <select v-model="currentSid" @change="switchSession" class="sb-select">
+      <button class="sb-new" :disabled="thinking || loading" @click="newSession">{{ L("sess_new") }}</button>
+      <select v-model="currentSid" :disabled="thinking || loading" @change="switchSession" class="sb-select">
         <option v-for="ss in sessions" :key="ss.id" :value="ss.id">{{ ss.title }}</option>
       </select>
-      <button class="sb-icon" :title="L('sess_rename_t')" @click="renameSession">✏</button>
-      <button class="sb-icon" :title="t('sess_del_c')" @click="delSession">🗑</button>
+      <button class="sb-icon" :disabled="thinking || loading || !currentSid" :title="L('sess_rename_t')" @click="renameSession">✏</button>
+      <button class="sb-icon" :disabled="thinking || loading || !currentSid" :title="t('sess_del_c')" @click="delSession">🗑</button>
     </div>
 
     <div class="messages" ref="box">
@@ -39,10 +39,10 @@
           <div class="content">{{ m.content }}</div>
           <div v-if="m.sources && m.sources.length" class="sources">
             <span class="s-title">{{ L("sources") }}</span>
-            <a v-for="(s, si) in m.sources" :key="si" class="chip"
+            <button v-for="(s, si) in m.sources" :key="si" class="chip" :disabled="!s.doc_id && !s.id"
                @click="$emit('openDoc', s)">
-              📄 {{ s.title }} <em>{{ L("page_n") }}{{ s.page }} · {{ Math.round(s.score * 100) }}%</em>
-            </a>
+              [{{ si + 1 }}] 📄 {{ s.title }} <em>{{ L("page_n") }}{{ s.page }}<template v-if="Number.isFinite(s.score)"> · {{ lang === 'zh' ? '相关度' : 'Relevance' }} {{ Math.round(s.score * 100) }}%</template></em>
+            </button>
             <details class="cite-details">
               <summary>{{ L("view_passages") }}</summary>
               <div v-for="(s, si) in m.sources" :key="'t' + si" class="cite-item">
@@ -64,16 +64,17 @@
       <input
         v-model="draft"
         :placeholder="L('chat_ph')"
-        :disabled="thinking"
+        :disabled="thinking || loading || !currentSid"
         @keydown.enter="send"
       />
-      <button :disabled="thinking || !draft.trim()" @click="send">{{ L("send") }}</button>
+      <button v-if="thinking" class="stop-answer" @click="controller?.abort()">{{ lang === 'zh' ? '停止接收' : 'Stop receiving' }}</button>
+      <button v-else :disabled="loading || !currentSid || !draft.trim()" @click="send">{{ L("send") }}</button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted } from "vue"
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount } from "vue"
 import { api } from "../api"
 import { t, lang } from "../i18n"
 const L = computed(() => {
@@ -85,6 +86,8 @@ defineEmits(["openDoc", "switchTab"])
 const list = ref([])
 const draft = ref("")
 const thinking = ref(false)
+const loading = ref(true)
+let controller = null
 const box = ref(null)
 const review = ref(null)
 const sessions = ref([])
@@ -100,7 +103,9 @@ async function loadSessions() {
     else if (sessions.value.length) currentSid.value = sessions.value[0].id
     else { await newSession(true); return }
     localStorage.setItem(kbKey(), currentSid.value)
-  } catch (e) {}
+  } catch (e) {
+    list.value = [{ role: 'assistant', content: lang.value === 'zh' ? '会话加载失败，请刷新页面重试。' : 'Could not load sessions. Please refresh.' }]
+  }
 }
 
 async function newSession(silent = false) {
@@ -113,7 +118,8 @@ async function newSession(silent = false) {
 
 async function switchSession() {
   localStorage.setItem(kbKey(), currentSid.value)
-  await loadHistory()
+  loading.value = true
+  try { await loadHistory() } finally { loading.value = false }
 }
 
 async function renameSession() {
@@ -125,7 +131,7 @@ async function renameSession() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: _pt.trim() })
   })
-  if (cur) cur.title = t.trim()
+  if (cur) cur.title = _pt.trim()
 }
 
 async function delSession() {
@@ -141,36 +147,45 @@ async function delSession() {
 }
 
 onMounted(async () => {
-  await loadSessions()
-  await loadHistory()
+  try {
+    await loadSessions()
+    if (currentSid.value) await loadHistory()
+  } finally { loading.value = false }
   try {
     const r = await fetch("/api/review/today")
     review.value = await r.json()
   } catch (e) {}
 })
+onBeforeUnmount(() => controller?.abort())
 
 async function send() {
   const q = draft.value.trim()
-  if (!q || thinking.value) return
+  if (!q || thinking.value || loading.value || !currentSid.value) return
   draft.value = ""
   list.value.push({ role: "user", content: q })
   thinking.value = true
+  controller = new AbortController()
+  const cur = reactive({ role: 'assistant', content: '', sources: [] })
+  list.value.push(cur)
+  let reader
+  let completed = false
   scroll()
   try {
     const resp = await fetch("/api/chat/stream", {
       method: "POST",
+      signal: controller.signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q })
+      body: JSON.stringify({ question: q, session_id: currentSid.value })
     })
     if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status)
-    const reader = resp.body.getReader()
+    reader = resp.body.getReader()
     const dec = new TextDecoder()
     let buf = ""
-    let cur = null
-    while (true) {
+    while (!completed) {
       const { done, value } = await reader.read()
       if (done) break
       buf += dec.decode(value, { stream: true })
+      buf = buf.replace(/\r\n/g, '\n')
       let i
       while ((i = buf.indexOf("\n\n")) >= 0) {
         const line = buf.slice(0, i).trim()
@@ -179,33 +194,44 @@ async function send() {
         let ev
         try { ev = JSON.parse(line.slice(5)) } catch (err) { continue }
         if (ev.type === "sources") {
-          cur = { role: "assistant", content: "", sources: ev.sources }
-          list.value.push(cur)
+          cur.sources = ev.sources || []
         } else if (ev.type === "delta") {
-          if (!cur || list.value[list.value.length - 1] !== cur) {
-            cur = cur && list.value.includes(cur) ? cur : { role: "assistant", content: "" }
-            list.value.push(cur)
-          }
           cur.content += ev.text
           scroll()
+        } else if (ev.type === "replace") {
+          cur.content = ev.text
+          scroll()
+        } else if (ev.type === "done") {
+          completed = true
+          break
         }
       }
     }
-    if (cur && !cur.content) cur.content = t(lang.value === "zh" ? "(AI未能给出有效回答，请重试)" : "(No valid answer, please try again)")
+    if (!completed || !cur.content.trim()) throw new Error('Incomplete stream')
   } catch (e) {
-    list.value.push({ role: "assistant", content: L("net_err") + e.message })
+    const note = e.name === 'AbortError'
+      ? (lang.value === 'zh' ? '已停止接收，以上内容可能不完整。重新加载后以服务端记录为准。' : 'Stopped receiving. The answer may be incomplete; reload to check saved history.')
+      : (lang.value === 'zh' ? '连接中断，回答可能不完整。请检查网络后重试；已接收的内容和来源保留在此页。' : 'Connection interrupted. This answer may be incomplete. Please retry.')
+    cur.content += (cur.content ? '\n\n' : '') + note
+  } finally {
+    if (reader) {
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
+    }
+    controller = null
+    thinking.value = false
+    scroll()
   }
-  thinking.value = false
-  scroll()
 }
 
 async function loadHistory(sid) {
   try {
     list.value = await api.history(sid ?? currentSid.value)
-  } catch (e) {}
+    scroll()
+  } catch (e) {
+    list.value = [{ role: 'assistant', content: lang.value === 'zh' ? '历史记录加载失败，请刷新页面重试。' : 'Could not load history. Please refresh.' }]
+  }
 }
-loadHistory()
-
 function scroll() {
   nextTick(() => box.value && (box.value.scrollTop = box.value.scrollHeight))
 }
@@ -236,6 +262,7 @@ function scroll() {
   width: 36px; height: 36px; cursor: pointer; flex-shrink: 0;
 }
 .sb-icon:hover { color: var(--text); border-color: var(--accent); }
+.sess-bar :disabled, .chip:disabled { opacity: .5; cursor: default; }
 
 .messages { flex: 1; overflow-y: auto; padding: 26px 34px; }
 

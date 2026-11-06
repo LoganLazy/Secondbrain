@@ -5,16 +5,17 @@
       <div class="doc-head">
         <button class="back" @click="$emit('close')">← {{ langv === "zh" ? "返回" : "Back" }}</button>
         <span class="doc-title">{{ doc.title || doc.filename }}</span>
-        <a v-if="sourceUrl" class="src-link" :href="sourceUrl" target="_blank">🌐 原网页</a>
+        <a v-if="sourceUrl" class="src-link" :href="sourceUrl" target="_blank" rel="noopener noreferrer">🌐 原网页</a>
       </div>
 
       <!-- 工具栏 -->
       <div class="tools">
-        <button @click="prevPage" :disabled="idx <= 0">>{{ L("prev") }}</button>
+        <button @click="prevPage" :disabled="loading || idx <= 0">{{ L("prev") }}</button>
         <span class="page-ind">
-          <span class="page-ind-txt">{{ L("page_n") }}</span> <input class="jump" v-model.number="jumpTo" @keydown.enter="goPage(jumpTo)" /> / {{ pages.length }}
+          <span class="page-ind-txt">{{ L("page_n") }}</span> <input class="jump" aria-label="跳转页码" :disabled="loading" v-model.number="jumpTo" @keydown.enter="goPage(jumpTo)" /> / {{ pageTotal }}
+          <small v-if="pageTotal !== pages.length">（可读 {{ pages.length }} 页）</small>
         </span>
-        <button @click="nextPage" :disabled="idx >= pages.length - 1">>{{ L("next") }}</button>
+        <button @click="nextPage" :disabled="loading || idx >= pages.length - 1">{{ L("next") }}</button>
         <template v-if="kind === 'pdf'">
           <span class="sep"></span>
           <button :class="{ on: viewMode === 'text' }" @click="viewMode = 'text'">{{ L("view_text") }}</button>
@@ -25,7 +26,15 @@
         <button @click="fontSize = Math.min(26, fontSize + 1)" title="放大字体">A+</button>
       </div>
 
-      <div class="pages" ref="pagesBox" tabindex="0" @keydown="onKey">
+      <div class="findbar">
+        <input v-model="findText" :disabled="loading" maxlength="256" placeholder="文内查找（区分大小写）" aria-label="文内查找" @keydown.enter="findNext(1)" />
+        <span>{{ matches.length === 1000 ? '≥' : '' }}{{ matches.length ? activeFind + 1 : 0 }} / {{ matches.length }}</span>
+        <button :disabled="!matches.length" @click="findNext(-1)" aria-label="上一个匹配">↑</button>
+        <button :disabled="!matches.length" @click="findNext(1)" aria-label="下一个匹配">↓</button>
+      </div>
+      <div v-if="navigationNotice" class="reader-notice" role="status">{{ navigationNotice }}</div>
+      <div v-if="renderErr" class="reader-notice" role="alert">{{ renderErr }}</div>
+      <div class="pages" ref="pagesBox" tabindex="0">
         <div v-if="loadErr" class="load-err">{{ loadErr }}</div>
 
         <template v-else-if="viewMode === 'original' && kind === 'pdf'">
@@ -41,7 +50,7 @@
              :style="{ fontSize: fontSize + 'px' }"
              @mouseup="onSelect" @touchend="onSelect">
           <div class="page-no">{{ pages[idx].page }}</div>
-          <div class="page-text">{{ pages[idx].text }}</div>
+          <div class="page-text"><template v-for="(part, n) in pageParts" :key="n"><mark v-if="part.hit" :class="{ active: part.active }">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></div>
         </div>
         <div v-else class="load-err">{{ L("loading") }}</div>
 
@@ -58,7 +67,7 @@
     <div class="ai-pane">
       <div class="quick">
         <span class="q-label">快捷操作:</span>
-        <button v-for="a in quicks" :key="a.label" :disabled="busy"
+        <button v-for="a in quicks" :key="a.label" :disabled="busy || loading || !!loadErr"
                 @click="runQuick(a)">{{ a.label }}</button>
       </div>
       <div class="ai-msgs" ref="aiBox">
@@ -67,21 +76,27 @@
         </div>
         <div v-for="(m, i) in msgs" :key="i" :class="['m', m.role]">
           <div class="m-content">{{ m.content }}</div>
+          <div v-if="m.notice" class="scope-notice">{{ m.notice }}</div>
+          <button v-for="(source, n) in m.sources || []" :key="n" class="reader-source" @click="goPage(source.page)">[{{ n + 1 }}] {{ source.filename }} · 第{{ source.page }}页</button>
           <button v-if="m.role === 'assistant'" class="copy" @click="copy(m)">{{ L("copy") }}</button>
         </div>
         <div v-if="busy" class="m assistant"><div class="m-content thinking">思考中…</div></div>
       </div>
       <div class="ask-bar">
-        <input v-model="draft" :placeholder="L('ask_page_ph')" @keydown.enter="askDraft" />
-        <button :disabled="busy" @click="askDraft">{{ L("ask") }}</button>
+        <input v-model="draft" :disabled="busy || loading || !!loadErr" :placeholder="L('ask_page_ph')" @keydown.enter="askDraft" />
+        <button :disabled="busy || loading || !!loadErr || !draft.trim()" @click="askDraft">{{ L("ask") }}</button>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted } from "vue"
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue"
+import { t as _t, lang as _lang } from "../i18n"
+import * as pdfjsLib from "pdfjs-dist"
+import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url"
 
+pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 const props = defineProps({ doc: Object })
 const L = (k) => _t(k)
 const langv = _lang
@@ -90,10 +105,12 @@ defineEmits(["close"])
 const pages = ref([])
 const msgs = ref([])
 const busy = ref(false)
+const loading = ref(true)
 const selection = ref("")
 const selPage = ref(null)
 const draft = ref("")
 const aiBox = ref(null)
+const pagesBox = ref(null)
 const idx = ref(0)
 const jumpTo = ref(1)
 const fontSize = ref(16)
@@ -102,147 +119,234 @@ const sourceUrl = ref("")
 const kind = ref("text")
 const viewMode = ref("text")
 const rendering = ref(false)
-let pdfDoc = null
-let renderTask = null
+const renderErr = ref("")
+const navigationNotice = ref("")
+const physicalPages = ref(0)
+const findText = ref("")
+const activeFind = ref(0)
+const kb = localStorage.getItem("kb") || "default"
+let progressKey = "", disposed = false, renderSequence = 0
+let pdfTask = null, pdfPromise = null, renderTask = null, assistantController = null
+const loadController = new AbortController()
+const pageTotal = computed(() => physicalPages.value || pages.value.reduce((total, p) => Math.max(total, p.page), 0))
 
-const quicks = [
-  { label: L("qa_sum_all"), question: langv === "zh" ? "请总结这份文档的核心内容" : "Summarize the core content of this document", scope: "all" },
-  { label: L("qa_explain_page"), question: langv === "zh" ? "用大白话解释这一页的内容" : "Explain this page in plain language", scope: "page" },
-  { label: L("qa_key_points"), question: langv === "zh" ? "提取这一页的关键要点，分条列出" : "Extract the key points of this page as a list", scope: "page" },
-  { label: L("qa_notes"), question: langv === "zh" ? "把这一页整理成结构化学习笔记(markdown要点式)" : "Turn this page into structured study notes (markdown bullets)", scope: "page" },
-  { label: L("qa_quiz"), question: langv === "zh" ? "基于这一页内容出3道自测题并附答案" : "Create 3 self-test questions with answers from this page", scope: "page" }
-]
+const quicks = computed(() => [
+  { label: L("qa_sum_all"), question: langv.value === "zh" ? "请总结提供的文档范围内的核心内容" : "Summarize the provided document context", scope: "document" },
+  { label: L("qa_explain_page"), question: langv.value === "zh" ? "用大白话解释这一页的内容" : "Explain this page in plain language", scope: "page" },
+  { label: L("qa_key_points"), question: langv.value === "zh" ? "提取这一页的关键要点，分条列出" : "Extract the key points of this page", scope: "page" },
+  { label: L("qa_notes"), question: langv.value === "zh" ? "把这一页整理成结构化学习笔记" : "Turn this page into structured study notes", scope: "page" },
+  { label: L("qa_quiz"), question: langv.value === "zh" ? "基于这一页内容出3道自测题并附答案" : "Create 3 self-test questions with answers from this page", scope: "page" }
+])
+
+const matches = computed(() => {
+  const needle = findText.value
+  const result = []
+  if (!needle) return result
+  for (let pageIndex = 0; pageIndex < pages.value.length; pageIndex++) {
+    const text = pages.value[pageIndex].text
+    let start = 0
+    while ((start = text.indexOf(needle, start)) !== -1) {
+      result.push({ pageIndex, start, end: start + needle.length })
+      if (result.length >= 1000) return result
+      start += needle.length
+    }
+  }
+  return result
+})
+const pageParts = computed(() => {
+  const text = pages.value[idx.value]?.text || ""
+  const parts = []
+  let cursor = 0
+  matches.value.forEach((match, n) => {
+    if (match.pageIndex !== idx.value) return
+    parts.push({ text: text.slice(cursor, match.start) })
+    parts.push({ text: text.slice(match.start, match.end), hit: true, active: n === activeFind.value })
+    cursor = match.end
+  })
+  parts.push({ text: text.slice(cursor) })
+  return parts
+})
+watch(findText, () => {
+  activeFind.value = 0
+  showMatch()
+})
+
+async function showMatch() {
+  const match = matches.value[activeFind.value]
+  if (!match) return
+  await goPage(pages.value[match.pageIndex].page)
+  await nextTick()
+  pagesBox.value?.querySelector("mark.active")?.scrollIntoView({ block: "center" })
+}
+function findNext(direction) {
+  if (!matches.value.length) return
+  activeFind.value = (activeFind.value + direction + matches.value.length) % matches.value.length
+  showMatch()
+}
+function saveProgress() {
+  if (loading.value || !progressKey || !pages.value[idx.value]) return
+  try { localStorage.setItem(progressKey, JSON.stringify({ page: pages.value[idx.value].page })) } catch {}
+}
+watch(idx, saveProgress)
 
 async function load() {
   try {
-    const res = await fetch(`/api/docs/${props.doc.id}/content`)
+    const res = await fetch("/api/docs/" + props.doc.id + "/content", { signal: loadController.signal })
+    if (!res.ok) throw new Error("文档不存在或无法读取")
     const r = await res.json()
-    if (!res.ok) throw new Error(r.detail || "加载失败")
-    pages.value = r.pages
+    if (disposed) return
+    pages.value = r.pages || []
+    if (!pages.value.length) throw new Error("文档没有可读文字")
     sourceUrl.value = r.source_url || ""
     kind.value = r.kind || "text"
-    jumpTo.value = pages.value[0]?.page ?? 1
+    progressKey = "memoryReader:" + kb + ":" + props.doc.id + ":" + (r.revision || "")
+    let savedPage
+    try { savedPage = JSON.parse(localStorage.getItem(progressKey) || "null")?.page } catch {}
+    // 明确的来源页码优先于阅读进度；版本变化后不沿用旧位置。
+    const target = props.doc.page ?? savedPage
+    const selected = pages.value.findIndex(p => p.page === target)
+    idx.value = selected >= 0 ? selected : 0
+    jumpTo.value = pages.value[idx.value].page
   } catch (e) {
-    loadErr.value = L("load_fail") + e.message + (langv === "zh" ? "（可能已被删除或丢失，请重新上传）" : "(it may have been deleted, please re-upload)")
+    if (e.name !== "AbortError") loadErr.value = L("load_fail") + e.message
+  } finally {
+    loading.value = false
   }
 }
-load()
 
-async function goPage(n) {
-  const total = (viewMode.value === "original" && pdfDoc) ? pdfDoc.numPages : pages.value.length
-  if (!n || n < 1 || n > total) return
-  const tIdx = pages.value.findIndex((p) => p.page === n)
-  idx.value = tIdx >= 0 ? tIdx : Math.min(n - 1, total - 1)
+async function goPage(value) {
+  if (loading.value || !pages.value.length) return
+  const page = Number(value)
+  const target = Number.isInteger(page) ? pages.value.findIndex(p => p.page === page) : -1
+  if (target < 0) {
+    navigationNotice.value = "该页没有可读文字或页码无效，请选择已有文字的页码。"
+    jumpTo.value = pages.value[idx.value].page
+    return
+  }
+  navigationNotice.value = ""
+  idx.value = target
   selection.value = ""
-  jumpTo.value = n
+  jumpTo.value = page
+  saveProgress()
+  if (pagesBox.value) pagesBox.value.scrollTop = 0
   if (viewMode.value === "original") await renderOriginal()
 }
 
-import * as pdfjsLib from "pdfjs-dist"
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url"
-pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
-
-async function ensurePdf() {
-  if (!pdfDoc) {
-    const task = pdfjsLib.getDocument({ url: `/api/docs/${props.doc.id}/file` })
-    pdfDoc = await task.promise
+function ensurePdf() {
+  if (!pdfPromise) {
+    pdfTask = pdfjsLib.getDocument({
+      url: "/api/docs/" + props.doc.id + "/file",
+      httpHeaders: { "X-KB-ID": kb }
+    })
+    pdfPromise = pdfTask.promise.then(pdf => {
+      physicalPages.value = pdf.numPages
+      return pdf
+    }).catch(error => { pdfPromise = null; throw error })
   }
-  return pdfDoc
+  return pdfPromise
 }
-
 async function renderOriginal() {
-  if (kind.value !== "pdf") return
+  if (kind.value !== "pdf" || !pages.value.length || disposed) return
+  const sequence = ++renderSequence
+  renderTask?.cancel()
   rendering.value = true
+  renderErr.value = ""
+  const pageNo = pages.value[idx.value].page
   try {
     await nextTick()
     const pdf = await ensurePdf()
-    const pageNo = Math.min(pages.value[idx.value]?.page ?? 1, pdf.numPages)
+    if (disposed || sequence !== renderSequence || viewMode.value !== "original") return
     const page = await pdf.getPage(pageNo)
-    const canvas = document.getElementById("pdf-canvas")
+    if (disposed || sequence !== renderSequence) return
+    const canvas = pagesBox.value?.querySelector("canvas")
     if (!canvas) return
-    const scale = 2.0
-    const viewport = page.getViewport({ scale })
+    const viewport = page.getViewport({ scale: 2 })
     canvas.width = viewport.width
     canvas.height = viewport.height
-    if (renderTask) renderTask.cancel()
     renderTask = page.render({ canvasContext: canvas.getContext("2d"), viewport })
     await renderTask.promise
   } catch (e) {
-    if (e?.name !== "RenderingCancelledException") console.error(e)
+    if (!disposed && sequence === renderSequence && e?.name !== "RenderingCancelledException") {
+      renderErr.value = "PDF 原件显示失败，可切回文字模式阅读或重新打开文档。"
+    }
+  } finally {
+    if (sequence === renderSequence) rendering.value = false
   }
-  rendering.value = false
 }
-async function prevPage() { await goPage(pages.value[Math.max(0, idx.value - 1)].page) }
-async function nextPage() { await goPage(pages.value[Math.min(pages.value.length - 1, idx.value + 1)].page) }
-
+function prevPage() { if (idx.value > 0) goPage(pages.value[idx.value - 1].page) }
+function nextPage() { if (idx.value + 1 < pages.value.length) goPage(pages.value[idx.value + 1].page) }
 function onKey(e) {
-  if (e.key === "ArrowLeft") prevPage()
-  else if (e.key === "ArrowRight") nextPage()
+  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey ||
+      e.target?.closest?.("input,textarea,select,button,[contenteditable]")) return
+  if (e.key === "ArrowLeft") { e.preventDefault(); prevPage() }
+  else if (e.key === "ArrowRight") { e.preventDefault(); nextPage() }
 }
-onMounted(() => window.addEventListener("keydown", onKey))
-onUnmounted(() => window.removeEventListener("keydown", onKey))
+onMounted(() => { load(); window.addEventListener("keydown", onKey) })
+onUnmounted(() => {
+  saveProgress()
+  disposed = true
+  renderSequence++
+  loadController.abort()
+  assistantController?.abort()
+  renderTask?.cancel()
+  if (pdfTask) Promise.resolve(pdfTask.destroy()).catch(() => {})
+  window.removeEventListener("keydown", onKey)
+})
 
-function onSelect(e) {
-  const s = window.getSelection().toString().trim()
-  if (s.length > 1) {
-    selection.value = s.slice(0, 2000)
-    selPage.value = pages.value[idx.value]?.page ?? null
-  } else {
+function onSelect() {
+  const chosen = window.getSelection()
+  if (!chosen || !pagesBox.value?.contains(chosen.anchorNode) || !pagesBox.value?.contains(chosen.focusNode)) {
     selection.value = ""
+    return
   }
+  const text = chosen.toString().trim()
+  selection.value = text.length > 1 ? text.slice(0, 2000) : ""
+  selPage.value = pages.value[idx.value]?.page ?? null
 }
 
-async function run(question, passage, page) {
-  if (busy.value) return
+async function run(question, scope = "page", passage = "", page = pages.value[idx.value]?.page) {
+  if (busy.value || loading.value || loadErr.value) return
   busy.value = true
-  msgs.value.push({ role: "user",
-    content: passage ? `【选中的内容】${passage.slice(0, 120)}…\n${question}` : question })
+  assistantController = new AbortController()
+  msgs.value.push({ role: "user", content: (scope === "document" ? "【文档范围】" : "【第" + page + "页】") + question })
   scroll()
   try {
     const r = await fetch("/api/assist", {
       method: "POST",
+      signal: assistantController.signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        passage: passage || "",
-        title: props.doc.title || props.doc.filename,
-        page: page ?? null
-      })
+      body: JSON.stringify({ doc_id: props.doc.id, question, scope, passage, page: scope === "document" ? null : page })
     })
     const d = await r.json()
-    msgs.value.push({ role: "assistant", content: d.answer || d.detail || "失败" })
+    if (disposed) return
+    if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "请求参数无效")
+    msgs.value.push({ role: "assistant", content: d.answer, sources: d.sources, notice: d.notice })
   } catch (e) {
-    msgs.value.push({ role: "assistant", content: "网络错误: " + e.message })
+    if (!disposed && e.name !== "AbortError") msgs.value.push({
+      role: "assistant", content: "阅读助手暂时无法完成请求，请检查网络或重新选择原文后重试。"
+    })
+  } finally {
+    assistantController = null
+    busy.value = false
+    scroll()
   }
-  busy.value = false
-  scroll()
 }
-
-function askSelected(q) {
-  run(q, selection.value, selPage.value)
+function askSelected(question) {
+  run(question, "selection", selection.value, selPage.value)
   selection.value = ""
-  window.getSelection().removeAllRanges()
+  window.getSelection()?.removeAllRanges()
 }
-
-function runQuick(a) {
-  const page = pages.value[idx.value]?.page ?? 1
-  const passage = a.scope === "all"
-    ? pages.value.map((p) => p.text).join("\n").slice(0, 12000)
-    : (pages.value[idx.value]?.text || "")
-  const q = a.scope === "all" ? a.question : `${a.question}（当前是第${page}页）`
-  run(q, passage, a.scope === "all" ? null : page)
-}
-
+function runQuick(action) { run(action.question, action.scope) }
 function askDraft() {
-  const q = draft.value.trim()
-  if (!q) return
+  const question = draft.value.trim()
+  if (!question || busy.value || loading.value || loadErr.value) return
   draft.value = ""
-  const page = pages.value[idx.value]?.page ?? 1
-  const passage = pages.value[idx.value]?.text || ""
-  run(q, passage, page)
+  run(question)
 }
-
-function copy(m) { navigator.clipboard.writeText(m.content) }
+async function copy(message) {
+  try { await navigator.clipboard.writeText(message.content) }
+  catch { navigationNotice.value = "复制失败，请手动选择文字复制。" }
+}
 function scroll() { nextTick(() => aiBox.value && (aiBox.value.scrollTop = aiBox.value.scrollHeight)) }
 </script>
 
@@ -260,6 +364,7 @@ function scroll() { nextTick(() => aiBox.value && (aiBox.value.scrollTop = aiBox
 
 .tools {
   display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
   padding: 10px 20px;
   border-bottom: 1px solid var(--border);
 }
@@ -284,6 +389,15 @@ function scroll() { nextTick(() => aiBox.value && (aiBox.value.scrollTop = aiBox
 .sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
 
 .pages { flex: 1; overflow-y: auto; padding: 24px 30px; position: relative; outline: none; }
+.findbar { display:flex; align-items:center; gap:8px; padding:10px 20px; border-bottom:1px solid var(--border); }
+.findbar input { flex:1; min-width:80px; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--panel2); color:var(--text); }
+.findbar span { font-size:12px; color:var(--muted); white-space:nowrap; }
+.findbar button, .reader-source { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:5px 9px; cursor:pointer; }
+.findbar button:disabled { opacity:.4; cursor:default; }
+.reader-source { font-size:12px; margin:6px 6px 0 0; }
+.reader-notice, .scope-notice { padding:8px 16px; font-size:13px; color:var(--muted); }
+.page-text mark { background:#ffe89a; color:inherit; border-radius:2px; }
+.page-text mark.active { background:#ffc14d; outline:2px solid #c48416; }
 .page {
   max-width: 720px;
   margin: 0 auto;

@@ -73,31 +73,19 @@ def _parse_docx(path: Path) -> list[tuple[str, int]]:
 
 
 def chunk_text(pages: list[tuple[str, int]]) -> list[dict]:
-    """段落聚合+滑窗切块. 返回 [{text, page}]"""
+    """逐页滑窗切块，不丢长行文字，也不跨页复用重叠内容。"""
     size, overlap = int(config.get("CHUNK_SIZE")), int(config.get("CHUNK_OVERLAP"))
-    chunks: list[dict] = []
-    buf, buf_page = "", pages[0][1] if pages else 1
-
-    def emit():
-        nonlocal buf
-        t = buf.strip()
-        if len(t) >= 20:
-            chunks.append({"text": t, "page": buf_page})
-        # 留尾巴做重叠
-        buf = t[-overlap:] if len(t) > overlap else ""
-
-    for para, page in pages:
-        for line in [p.strip() for p in para.split("\n") if p.strip()]:
-            if page != buf_page:
-                emit()
-                buf_page = page
-            while len(buf) + len(line) >= size:
-                buf += " " + line[: size - len(buf)]
-                emit()
-                line = line[max(0, len(line) - overlap):]
-                if not line:
-                    break
-            if line:
-                buf += (" " if buf else "") + line
-    emit()
+    if size <= 0 or overlap < 0 or overlap >= size:
+        raise ValueError("切块参数无效：需满足 CHUNK_SIZE > CHUNK_OVERLAP >= 0")
+    chunks = []
+    for text, page in pages:
+        # 仅整理行间空白；每一页独立推进窗口，末尾短片段也不能丢失。
+        text = " ".join(line.strip() for line in text.splitlines() if line.strip())
+        start = 0
+        while start < len(text):
+            end = min(start + size, len(text))
+            chunks.append({"text": text[start:end], "page": page})
+            if end == len(text):
+                break
+            start = end - overlap
     return chunks

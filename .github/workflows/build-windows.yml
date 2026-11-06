@@ -38,7 +38,7 @@ jobs:
       - name: Build backend engine (PyInstaller onedir)
         working-directory: backend
         run: >-
-          pyinstaller --onedir --noconsole --name SecondBrain-backend server_entry.py
+          pyinstaller --onedir --noconsole --name NebulaMemory-backend server_entry.py
           --paths .
           --add-data "../frontend/dist;frontend_dist"
           --hidden-import uvicorn.logging
@@ -64,17 +64,17 @@ jobs:
       - name: Assemble portable package
         shell: pwsh
         run: |
-          $root = "package/MemoryAI"
+          $root = "package/NebulaMemory"
           New-Item -ItemType Directory -Force -Path "$root/resources/backend", "$root/知识库文件夹/默认知识库" | Out-Null
           # Electron壳
           Copy-Item electron/out/win-unpacked/* $root -Recurse -Force
           # 后端引擎
-          Copy-Item backend/dist/SecondBrain-backend/* "$root/resources/backend/" -Recurse -Force
+          Copy-Item backend/dist/NebulaMemory-backend/* "$root/resources/backend/" -Recurse -Force
           Copy-Item README.md $root/
-          Compress-Archive -Path package/* -DestinationPath SecondBrain-Windows-x64.zip
+          Compress-Archive -Path package/* -DestinationPath Nebula-Memory-Windows-x64.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SecondBrain-Windows-x64
-          path: SecondBrain-Windows-x64.zip
+          name: Nebula-Memory-Windows-x64
+          path: Nebula-Memory-Windows-x64.zip

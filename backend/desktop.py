@@ -1,4 +1,4 @@
-"""SecondBrain Windows桌面入口: 启动本地服务 + 打开应用窗口"""
+"""Nebula Memory Windows桌面入口: 启动本地服务 + 打开应用窗口"""
 import os
 import sys
 import threading
@@ -24,12 +24,14 @@ def start_server():
 
 def wait_server(timeout=40):
     import urllib.request
+    import json
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen("http://127.0.0.1:8787/api/stats",
+            with urllib.request.urlopen("http://127.0.0.1:8787/api/health",
                                         timeout=2) as r:
-                if r.status == 200:
+                payload = json.load(r)
+                if r.status == 200 and payload.get('product') == 'Nebula Memory' and payload.get('status') == 'ok':
                     return True
         except Exception:
             time.sleep(0.6)
@@ -44,7 +46,7 @@ def main():
     try:
         import webview
         webview.create_window(
-            "SecondBrain · Your Second Brain",
+            "Nebula Memory · Your Private Knowledge Base",
             "http://127.0.0.1:8787",
             width=1320, height=860,
             background_color="#0f1115",

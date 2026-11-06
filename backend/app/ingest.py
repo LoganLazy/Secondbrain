@@ -2,14 +2,57 @@
 import hashlib
 import os
 import json
+import threading
+import time
 from pathlib import Path
 
 import chromadb
+import httpx
 
 from . import bm25, config, db, parser, providers
+from .vector_compat import dimensions_compatible, mismatch_message
+from .lifecycle import serialized
 
 _client = chromadb.PersistentClient(path=str(config.DATA_DIR / "chroma"))
 _col = _client.get_or_create_collection("knowledge", metadata={"hnsw:space": "cosine"})
+_vector_warning = ""
+_last_query_dimension: int | None = None
+_rebuild_lock = threading.Lock()
+
+
+def collection_dimension() -> int | None:
+    """Return the persisted collection dimension without calling any provider."""
+    if _col.count() == 0:
+        return None
+    sample = _col.get(limit=1, include=["embeddings"])
+    embeddings = sample.get("embeddings")
+    if embeddings is None or len(embeddings) == 0:
+        return None
+    return len(embeddings[0])
+
+
+def vector_health() -> dict:
+    stored = collection_dimension()
+    current = _last_query_dimension
+    return {
+        "stored_dimension": stored,
+        "current_dimension": current,
+        "compatible": dimensions_compatible(stored, current),
+        "warning": _vector_warning,
+        "rebuilding": _rebuild_lock.locked(),
+    }
+
+
+def _check_vectors(vectors: list[list[float]]) -> None:
+    """Reject incompatible writes before Chroma emits an opaque exception."""
+    global _last_query_dimension, _vector_warning
+    current = len(vectors[0]) if vectors else None
+    _last_query_dimension = current
+    stored = collection_dimension()
+    if not dimensions_compatible(stored, current):
+        _vector_warning = mismatch_message(stored, current)
+        raise ValueError(_vector_warning)
+    _vector_warning = ""
 
 
 def file_hash(path: Path) -> str:
@@ -18,6 +61,15 @@ def file_hash(path: Path) -> str:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()[:16]
+
+
+def chunk_id(kb_id: str, file_hash_value: str, index: int) -> str:
+    """IDs are collection-global, so namespace them by knowledge base."""
+    return f"{kb_id}_{file_hash_value}_{index}"
+
+
+def _doc_where(file_hash_value: str, kb_id: str) -> dict:
+    return {"$and": [{"file_hash": file_hash_value}, {"kb_id": kb_id}]}
 
 
 def call_chat(messages: list[dict], temperature: float = 0.3,
@@ -40,14 +92,16 @@ def call_chat(messages: list[dict], temperature: float = 0.3,
         data = r.json()
         msg = data["choices"][0]["message"]
         content = (msg.get("content") or "").strip()
+        if content and data["choices"][0].get("finish_reason") == "length":
+            raise ValueError("AI回答被截断")
         if content:
             return content
         # 正文为空但思考有内容 => token被思考耗尽, 加大预算重试
         if data["choices"][0].get("finish_reason") == "length":
             continue
         # 模型明确拒答等场景, 直接返回原样
-        return "(AI未能给出有效回答，请换个问法试试)"
-    return "(回答超时或被截断，请重试)"
+        raise ValueError("AI未能给出有效回答")
+    raise ValueError("回答超时或被截断")
 
 
 ANALYZE_PROMPT = (
@@ -62,6 +116,8 @@ def call_chat_stream(messages: list[dict], temperature: float = 0.4,
     """SSE流式对话生成器, 逐段yield文本"""
     import httpx
 
+    if config.get("NET_MODE") == "offline":
+        raise ValueError("当前为离线模式，AI对话不可用")
     budget = max_tokens
     with httpx.stream(
         "POST",
@@ -73,22 +129,36 @@ def call_chat_stream(messages: list[dict], temperature: float = 0.4,
     ) as r:
         r.raise_for_status()
         got_any = False
+        completed = False
         for line in r.iter_lines():
             if not line.startswith("data:"):
                 continue
             payload = line[5:].strip()
             if payload == "[DONE]":
+                completed = True
                 break
             try:
                 j = json.loads(payload)
             except Exception:
                 continue
-            delta = j["choices"][0].get("delta", {})
+            choices = j.get("choices", [])
+            if not choices:
+                if j.get("error"):
+                    raise ValueError("AI服务返回错误")
+                continue  # 部分兼容服务会单独发送 usage
+            finish = choices[0].get("finish_reason")
+            if finish in ("length", "content_filter"):
+                raise ValueError("AI回答被截断或过滤")
+            if finish == "stop":
+                completed = True
+            delta = choices[0].get("delta", {})
             piece = delta.get("content") or ""
             if piece:
                 got_any = True
                 yield piece
-        # 推理模型思考耗尽预算时流里可能一个字都没有
+        if not completed:
+            raise ValueError("AI连接在完成前中断")
+        # 完成但没有正文时尝试非流式回答
         if not got_any:
             yield call_chat(messages, temperature, max_tokens * 3)
 
@@ -113,8 +183,14 @@ def analyze(text_sample: str) -> dict:
     }
 
 
+@serialized
 def ingest(path: Path, display_name: str | None = None,
-           keep_path: Path | None = None, kb_id: str = "default") -> dict:
+           keep_path: Path | None = None, kb_id: str = "default", progress=None) -> dict:
+    from .restore import pending_path
+    if pending_path().exists():
+        raise ValueError('已有等待重启的恢复任务，请先重启服务')
+    progress = progress or (lambda stage: None)
+    progress('checking')
     fh = file_hash(path)
     exist = db.get().execute(
         "SELECT * FROM docs WHERE file_hash=? AND kb_id=?", (fh, kb_id)
@@ -127,30 +203,23 @@ def ingest(path: Path, display_name: str | None = None,
         "SELECT id, file_hash FROM docs WHERE filename=? AND kb_id=?",
         (display_name or path.name, kb_id),
     ).fetchone()
-    if old_row:
-        old_res = _col.get(where={"file_hash": old_row["file_hash"]})
-        for cid in old_res["ids"]:
-            bm25.INDEX.remove(cid)
-        if old_res["ids"]:
-            _col.delete(ids=old_res["ids"])
-
+    progress('parsing')
     pages = parser.parse(path)
     chunks = parser.chunk_text(pages)
     if not chunks:
         raise ValueError("没有解析出有效内容")
 
     texts = [c["text"] for c in chunks]
+    progress('embedding')
     vectors = providers.embed(texts)
+    _check_vectors(vectors)
 
-    ids = [f"{fh}_{i}" for i in range(len(chunks))]
+    ids = [chunk_id(kb_id, fh, i) for i in range(len(chunks))]
     metadatas = [
         {"file_hash": fh, "page": c["page"], "chunk_index": i, "kb_id": kb_id}
         for i, c in enumerate(chunks)
     ]
-    _col.add(ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas)
-    for cid, text, meta in zip(ids, texts, metadatas):
-        bm25.INDEX.add(cid, text, meta)
-
+    progress('summarizing')
     full_head = "\n".join(texts[:8])
     info = analyze(full_head)
     info = {
@@ -159,6 +228,16 @@ def ingest(path: Path, display_name: str | None = None,
     }
 
     stored = str(keep_path) if keep_path else ""
+    progress('saving')
+    # 新版本准备好后才开始写索引；解析/向量化失败不动旧资料。
+    try:
+        _col.upsert(ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas)
+        bm25.INDEX.add_batch(list(zip(ids, texts, metadatas)))
+    except Exception:
+        _col.delete(ids=ids)
+        for cid in ids:
+            bm25.INDEX.remove(cid)
+        raise
     if old_row:
         db.get().execute(
             "UPDATE docs SET title=?, category=?, tags=?, summary=?, chunks=?, "
@@ -168,6 +247,11 @@ def ingest(path: Path, display_name: str | None = None,
              info["summary"], len(chunks), fh, stored, old_row["id"]),
         )
         db.get().commit()
+        old_res = _col.get(where=_doc_where(old_row["file_hash"], kb_id))
+        if old_res['ids']:
+            _col.delete(ids=old_res['ids'])
+            for cid in old_res['ids']:
+                bm25.INDEX.remove(cid)
         return {"id": old_row["id"], **info, "chunks": len(chunks),
                 "filename": display_name or path.name, "updated": True}
 
@@ -185,11 +269,13 @@ def ingest(path: Path, display_name: str | None = None,
 
 def get_doc(doc_id: int):
     row = db.get().execute(
-        "SELECT id,filename,title,file_path,source_url FROM docs WHERE id=?", (doc_id,)
+        "SELECT id,filename,title,file_path,file_hash,source_url,kb_id FROM docs WHERE id=?", (doc_id,)
     ).fetchone()
     if not row:
         raise ValueError("文档不存在")
-    return row
+    from .backup import locate_original
+    located = locate_original(row['file_path'], row['file_hash'])
+    return {**dict(row), 'file_path': str(located) if located else row['file_path']}
 
 
 def doc_pages(doc_id: int) -> list[dict]:
@@ -220,23 +306,18 @@ def doc_pages(doc_id: int) -> list[dict]:
     return [{"page": p, "text": t} for t, p in pages]
 
 
+@serialized
 def delete_doc(doc_id: int):
-    row = db.get().execute("SELECT file_hash FROM docs WHERE id=?", (doc_id,)).fetchone()
+    row = db.get().execute(
+        "SELECT file_hash,kb_id FROM docs WHERE id=?", (doc_id,)
+    ).fetchone()
     if not row:
         raise ValueError("文档不存在")
-    _col.delete(where={"file_hash": row["file_hash"]})
-    db.get().execute("DELETE FROM docs WHERE id=?", (doc_id,))
-    db.get().commit()
-
-
-def delete_doc(doc_id: int):
-    row = db.get().execute("SELECT file_hash FROM docs WHERE id=?", (doc_id,)).fetchone()
-    if not row:
-        raise ValueError("文档不存在")
-    ids = _col.get(where={"file_hash": row["file_hash"]})["ids"]
+    where = _doc_where(row["file_hash"], row["kb_id"] or "default")
+    ids = _col.get(where=where)["ids"]
     for cid in ids:
         bm25.INDEX.remove(cid)
-    _col.delete(where={"file_hash": row["file_hash"]})
+    _col.delete(where=where)
     db.get().execute("DELETE FROM docs WHERE id=?", (doc_id,))
     db.get().commit()
 
@@ -264,15 +345,20 @@ def get_search_latency() -> dict:
     }
 
 
-def search(query: str, k: int | None = None, kb_id: str = "default") -> list[dict]:
+def search(query: str, k: int | None = None, kb_id: str = "default",
+           diagnostics: dict | None = None, mode: str = 'hybrid') -> list[dict]:
     """混合检索: 向量语义 + BM25关键词, 加权融合"""
     import os
     import time as _time
 
+    if mode not in ('hybrid', 'keyword'):
+        raise ValueError('检索模式无效')
     t0 = _time.perf_counter()
-    marker = {"embed_done": False}
+    marker = {"embed_done": False, 'mode': mode}
     try:
-        result = _search_impl(query, k, kb_id, marker)
+        result = _search_impl(query, k, kb_id, marker, mode)
+        if diagnostics is not None:
+            diagnostics.update({"warning": marker.get("warning", ""), 'mode': marker['mode']})
         return result
     finally:
         total = (_time.perf_counter() - t0) * 1000
@@ -283,34 +369,51 @@ def search(query: str, k: int | None = None, kb_id: str = "default") -> list[dic
 
 
 def _search_impl(query: str, k: int | None = None,
-                 kb_id: str = "default", marker: dict | None = None) -> list[dict]:
+                 kb_id: str = "default", marker: dict | None = None,
+                 mode: str = 'hybrid') -> list[dict]:
     k = k or config.get("TOP_K")
     fetch = max(k * 3, 12)
     where = {"kb_id": kb_id}
 
     # --- 向量路 ---
     vec_results = {}
-    if _col.count() > 0:
-        vec = providers.embed([query])[0]
-        res = _col.query(query_embeddings=[vec], n_results=min(fetch, _col.count()),
-                         where=where or None)
-        docs_table = db.get()
-        v_scores = []
-        for i, meta in enumerate(res["metadatas"][0]):
-            fh = meta["file_hash"]
-            r = docs_table.execute(
-                "SELECT id,title,filename FROM docs WHERE file_hash=?", (fh,)
-            ).fetchone()
-            if not r:
-                continue
-            cid = res["ids"][0][i]
-            sim = 1 - res["distances"][0][i]
-            vec_results[cid] = {
-                "doc_id": r["id"], "title": r["title"] or r["filename"],
-                "filename": r["filename"], "page": meta["page"],
-                "text": res["documents"][0][i], "v": sim,
-            }
-            v_scores.append(sim)
+    if mode == 'hybrid' and _col.count() > 0:
+        global _last_query_dimension, _vector_warning
+        try:
+            vec = providers.embed([query])[0]
+            _last_query_dimension = len(vec)
+            stored = collection_dimension()
+            if not dimensions_compatible(stored, len(vec)):
+                raise ValueError(mismatch_message(stored, len(vec)))
+            res = _col.query(query_embeddings=[vec], n_results=min(fetch, _col.count()),
+                             where=where)
+            _vector_warning = ""
+            docs_table = db.get()
+            v_scores = []
+            for i, meta in enumerate(res["metadatas"][0]):
+                if meta.get("kb_id", "default") != kb_id:
+                    continue
+                fh = meta["file_hash"]
+                r = docs_table.execute(
+                    "SELECT id,title,filename FROM docs WHERE file_hash=? AND kb_id=?",
+                    (fh, meta.get("kb_id", "default")),
+                ).fetchone()
+                if not r:
+                    continue
+                cid = res["ids"][0][i]
+                sim = max(0.0, 1 - res["distances"][0][i])
+                vec_results[cid] = {
+                    "doc_id": r["id"], "title": r["title"] or r["filename"],
+                    "filename": r["filename"], "page": meta["page"],
+                    "text": res["documents"][0][i], "v": sim, 'revision': fh,
+                }
+                v_scores.append(sim)
+        except Exception:
+            vec_results.clear()
+            _vector_warning = "语义检索暂不可用（连接或向量维度异常），已降级为关键词检索；可检查模型配置及索引。"
+            if marker is not None:
+                marker["warning"] = _vector_warning
+                marker['mode'] = 'keyword_fallback'
     # 归一化向量分
     if vec_results:
         vmax = max(x["v"] for x in vec_results.values()) or 1.0
@@ -324,7 +427,9 @@ def _search_impl(query: str, k: int | None = None,
     # --- 关键词路(BM25) ---
     _ensure_bm25()
     kw_results = {}
-    for cid, s, meta in bm25.INDEX.search(query, top_k=fetch):
+    for cid, s, meta in bm25.INDEX.search(query, top_k=fetch, kb_id=kb_id):
+        if meta.get("kb_id", "default") != kb_id:
+            continue
         kw_results[cid] = {"score": s, "meta": meta}
     if kw_results:
         kmax = max(x["score"] for x in kw_results.values()) or 1.0
@@ -339,16 +444,19 @@ def _search_impl(query: str, k: int | None = None,
         if cid not in fused:
             m = x["meta"]
             r = db.get().execute(
-                "SELECT id,title,filename FROM docs WHERE file_hash=?",
-                (m.get("file_hash"),),
+                "SELECT id,title,filename FROM docs WHERE file_hash=? AND kb_id=?",
+                (m.get("file_hash"), m.get("kb_id", "default")),
             ).fetchone()
             if not r:
                 continue
-            doc_text = _col.get(ids=[cid])["documents"][0]
+            documents = _col.get(ids=[cid])["documents"]
+            if not documents:
+                continue  # 旧关键词条目或并发删除不能中断整个检索
+            doc_text = documents[0]
             fused[cid] = {
                 "doc_id": r["id"], "title": r["title"] or r["filename"],
                 "filename": r["filename"], "page": m.get("page", 1),
-                "text": doc_text, "v": 0.0, "vn": 0.0,
+                "text": doc_text, "v": 0.0, "vn": 0.0, 'revision': m.get('file_hash', ''),
                 "kw": x["kn"],
             }
 
@@ -358,7 +466,7 @@ def _search_impl(query: str, k: int | None = None,
 
     # --- 可选Rerank精排 ---
     rerank_base = os.environ.get("RERANK_BASE_URL")
-    if rerank_base and len(out) > 1:
+    if mode == 'hybrid' and rerank_base and len(out) > 1:
         try:
             pairs = [x["text"][:1500] for x in out]
             rr = httpx.post(
@@ -382,3 +490,80 @@ def _search_impl(query: str, k: int | None = None,
 
     out.sort(key=lambda x: -x["score"])
     return out[:k]
+
+
+@serialized
+def rebuild_vector_index() -> dict:
+    """Rebuild all vectors in a temporary collection, then atomically switch.
+
+    Document metadata and source files remain untouched. A provider/parser
+    failure deletes only the temporary collection and preserves the old index.
+    """
+    global _col, _vector_warning, _last_query_dimension
+    if not _rebuild_lock.acquire(blocking=False):
+        raise ValueError("向量索引正在重建，请稍后再试")
+    temp_name = f"knowledge_rebuild_{int(time.time())}"
+    temp = None
+    items_for_bm25: list[tuple[str, str, dict]] = []
+    skipped: list[str] = []
+    try:
+        temp = _client.get_or_create_collection(
+            temp_name, metadata={"hnsw:space": "cosine"}
+        )
+        rows = db.get().execute(
+            "SELECT id,filename,file_hash,file_path,kb_id FROM docs ORDER BY id"
+        ).fetchall()
+        chunk_total = 0
+        for row in rows:
+            path = Path(row["file_path"] or "")
+            if not row["file_path"] or not path.exists():
+                skipped.append(row["filename"])
+                continue
+            chunks = parser.chunk_text(parser.parse(path))
+            if not chunks:
+                skipped.append(row["filename"])
+                continue
+            texts = [c["text"] for c in chunks]
+            vectors = providers.embed(texts)
+            kb_id = row["kb_id"] or "default"
+            ids = [chunk_id(kb_id, row["file_hash"], i) for i in range(len(chunks))]
+            metas = [
+                {"file_hash": row["file_hash"], "page": c["page"],
+                 "chunk_index": i, "kb_id": kb_id}
+                for i, c in enumerate(chunks)
+            ]
+            temp.add(ids=ids, documents=texts, embeddings=vectors, metadatas=metas)
+            items_for_bm25.extend(zip(ids, texts, metas))
+            chunk_total += len(chunks)
+            db.get().execute("UPDATE docs SET chunks=? WHERE id=?",
+                             (len(chunks), row["id"]))
+
+        # Chroma collection dimensions persist even after deleting all rows,
+        # so replace the collection rather than clearing it.
+        backup_name = f"knowledge_backup_{int(time.time())}"
+        old = _col
+        old.modify(name=backup_name)
+        try:
+            temp.modify(name="knowledge")
+        except Exception:
+            old.modify(name="knowledge")
+            raise
+        _col = temp
+        _client.delete_collection(backup_name)
+        bm25.INDEX.clear()
+        bm25.INDEX.add_batch(items_for_bm25)
+        db.get().commit()
+        _last_query_dimension = collection_dimension()
+        _vector_warning = ""
+        return {"docs": len(rows) - len(skipped), "chunks": chunk_total,
+                "skipped": skipped, "dimension": _last_query_dimension}
+    except Exception:
+        if temp is not None:
+            try:
+                # After a successful rename the temporary name no longer exists.
+                _client.delete_collection(temp_name)
+            except Exception:
+                pass
+        raise
+    finally:
+        _rebuild_lock.release()

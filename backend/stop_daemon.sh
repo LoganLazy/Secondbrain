@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
+set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$DIR/.pid" ]; then
-  kill "$(cat $DIR/.pid)" 2>/dev/null && rm -f "$DIR/.pid" && echo "已停止"
-else
-  echo "没有在运行"
-fi
+exec "$DIR/.venv/bin/python" "$DIR/service_control.py" stop

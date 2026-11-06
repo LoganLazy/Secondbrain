@@ -19,22 +19,24 @@ function homeDir() {
 }
 
 function startBackend() {
-  // 打包版: resources/backend/SecondBrain-backend/SecondBrain-backend.exe
+  // 打包版: resources/backend/NebulaMemory-backend.exe
   const res = process.resourcesPath || path.join(__dirname, "resources")
   const candidates = [
+    path.join(res, "backend", "NebulaMemory-backend.exe"),
+    path.join(__dirname, "..", "server", "NebulaMemory-backend.exe"),
+    // 兼容旧版开发构建
     path.join(res, "backend", "SecondBrain-backend", "SecondBrain-backend.exe"),
-    path.join(__dirname, "..", "server", "SecondBrain-backend.exe"),
   ]
   const exe = candidates.find((p) => {
     try { return require("fs").existsSync(p) } catch (e) { return false }
   })
   if (!exe) {
-    console.log("[MemoryAI] 未找到后端引擎, 若服务已手动启动可直接使用")
+    console.log("[NebulaMemory] 未找到后端引擎, 若服务已手动启动可直接使用")
     return
   }
   backendProc = spawn(exe, [], {
     cwd: homeDir(),
-    env: { ...process.env, MEMORY_AI_HOME: homeDir() },
+    env: { ...process.env, NEBULA_MEMORY_HOME: homeDir(), MEMORY_AI_HOME: homeDir() },
     stdio: "ignore",
     windowsHide: true,
   })
@@ -56,7 +58,7 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1320,
     height: 860,
-    title: "SecondBrain",
+    title: "Nebula Memory",
     autoHideMenuBar: true,
     backgroundColor: "#0f1115",
     webPreferences: { contextIsolation: true },

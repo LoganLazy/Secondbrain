@@ -11,3 +11,11 @@ __pycache__/
 core.*
 frontend/dist/
 backend/.pid
+
+# Local knowledge inbox and personal material (existing tracked samples remain).
+知识库文件夹/
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
