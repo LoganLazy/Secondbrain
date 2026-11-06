@@ -46,7 +46,8 @@ def _messages(question, hits, kb_id, session_id):
             " ORDER BY id DESC LIMIT 6", (kb_id, session_id))
     ][::-1]
     memories = [r["content"][:200] for r in db.get().execute(
-        "SELECT content FROM memories ORDER BY id DESC LIMIT 20")]
+        "SELECT content FROM memories WHERE kb_id=? ORDER BY id DESC LIMIT 20",
+        (kb_id,))]
     system = RAG_PROMPT.format(context=build_context(hits))
     if memories:
         system += "\n\n用户偏好背景（不是资料依据）: " + "；".join(memories)

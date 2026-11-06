@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.security import copy_limited, safe_upload_name, validate_public_url
+from app.security import (
+    copy_limited,
+    kb_inbox_path,
+    safe_rmtree,
+    safe_upload_name,
+    validate_public_url,
+)
 
 
 class InputSecurityTests(unittest.TestCase):
@@ -44,6 +50,36 @@ class InputSecurityTests(unittest.TestCase):
             validate_public_url("https://example.com/page", public_resolver),
             "https://example.com/page",
         )
+
+    def test_kb_inbox_path_rejects_dot_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inbox = Path(directory) / "inbox"
+            inbox.mkdir()
+            for bad in (".", "..", "../escape"):
+                with self.subTest(name=bad), self.assertRaises(ValueError):
+                    kb_inbox_path(bad, inbox)
+            self.assertEqual(kb_inbox_path("工作", inbox), inbox / "工作")
+
+    def test_safe_rmtree_never_removes_outside_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            inbox = base / "inbox"
+            inbox.mkdir()
+            keep = base / "keep.txt"
+            keep.write_text("do not delete")
+            victim = inbox / "work"
+            victim.mkdir()
+            (victim / "note.txt").write_text("x")
+            # 正常库目录删掉, 根目录本身和外面的东西纹丝不动。
+            self.assertTrue(safe_rmtree(victim, inbox))
+            self.assertFalse(victim.exists())
+            self.assertTrue(inbox.exists())
+            self.assertFalse(safe_rmtree(inbox, inbox))
+            self.assertTrue(inbox.exists())
+            self.assertFalse(safe_rmtree(inbox / "..", inbox))
+            self.assertFalse(safe_rmtree(base / "keep.txt", inbox))
+            self.assertTrue(keep.exists())
+            self.assertEqual(keep.read_text(), "do not delete")
 
 
 if __name__ == "__main__":

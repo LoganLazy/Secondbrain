@@ -36,6 +36,39 @@ class IngestSafetyTests(unittest.TestCase):
         self.stack.close()
         self.temp.cleanup()
 
+    def test_delete_doc_removes_the_original_file(self):
+        self.assertTrue(self.first.exists())
+        ingest.delete_doc(self.info['id'])
+        self.assertFalse(self.first.exists())
+        self.assertIsNone(db.get().execute(
+            "SELECT 1 FROM docs WHERE id=?", (self.info['id'],)).fetchone())
+
+    def test_delete_doc_keeps_a_file_still_referenced_by_another_kb(self):
+        other = ingest.ingest(self.first, display_name='same.txt',
+                              keep_path=self.first, kb_id='other')
+        self.assertNotEqual(other['id'], self.info['id'])
+        ingest.delete_doc(self.info['id'])
+        self.assertTrue(self.first.exists())
+        ingest.delete_doc(other['id'])
+        self.assertFalse(self.first.exists())
+
+    def test_deleted_document_original_is_absent_from_backup(self):
+        import zipfile
+
+        from app.backup import cleanup_backup, create_backup
+
+        ingest.delete_doc(self.info['id'])
+        missing_settings = self.base / 'no-settings.json'
+        with patch.object(config, 'SETTINGS_FILE', missing_settings):
+            archive = create_backup()
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                self.assertFalse(
+                    any('first.txt' in name for name in zf.namelist()),
+                    zf.namelist())
+        finally:
+            cleanup_backup(archive)
+
     def test_failed_same_name_replacement_keeps_old_document_and_index(self):
         replacement = self.uploads / 'second.txt'
         replacement.write_text('replacement beta reference document')

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import secrets
 import sys
 import threading
 import time
@@ -26,7 +27,7 @@ acquire_service_lease()
 activate_pending()
 from . import ingest, rag
 from . import cards as cards_mod
-from .security import copy_limited, safe_upload_name, validate_public_url
+from .security import copy_limited, kb_inbox_path, safe_rmtree, safe_upload_name, validate_public_url
 
 app = FastAPI(title="Nebula Memory")
 _jobs = None
@@ -333,7 +334,7 @@ def chat(request: Request, qa: QA):
     # 后台自动提取长期记忆, 不阻塞回答
     if result.get("mode") == "generated":
         threading.Thread(
-            target=auto_memory, args=(qa.question, result.get("answer", "")),
+            target=auto_memory, args=(qa.question, result.get("answer", ""), kb),
             daemon=True,
         ).start()
     return result
@@ -375,13 +376,14 @@ def review_today(request: Request):
     return {"due_cards": len(due), "picks": picks}
 
 
-def auto_memory(question: str, answer: str):
-    """从对话中自动提取值得长期记住的用户信息"""
+def auto_memory(question: str, answer: str, kb_id: str = "default"):
+    """从对话中自动提取值得长期记住的用户信息(仅归属当前知识库)"""
     if config.get("NET_MODE") == "offline":
         return
     try:
         existing = [r["content"] for r in db.get().execute(
-            "SELECT content FROM memories ORDER BY id DESC LIMIT 100")]
+            "SELECT content FROM memories WHERE kb_id=? ORDER BY id DESC LIMIT 100",
+            (kb_id,))]
         prompt = (
             "从下面的用户对话中, 提取值得AI长期记住的【用户个人信息/设备/偏好/背景】"
             "(例如: 有什么服务器、用什么工具、职业、习惯)。"
@@ -406,8 +408,8 @@ def auto_memory(question: str, answer: str):
             if any(fact[:20] in e or e[:20] in fact for e in existing):
                 continue
             db.get().execute(
-                "INSERT INTO memories(content,created) VALUES(?,?)",
-                (fact, db.now()),
+                "INSERT INTO memories(content,kb_id,created) VALUES(?,?,?)",
+                (fact, kb_id, db.now()),
             )
             db.get().commit()
             existing.insert(0, fact)
@@ -429,24 +431,27 @@ def history(request: Request, limit: int = 200, session_id: str = ""):
 
 
 @app.post("/api/memory")
-def add_memory(m: MemoryIn):
+def add_memory(request: Request, m: MemoryIn):
     db.get().execute(
-        "INSERT INTO memories(content,created) VALUES(?,?)", (m.content, db.now())
+        "INSERT INTO memories(content,kb_id,created) VALUES(?,?,?)",
+        (m.content, KB(request), db.now())
     )
     db.get().commit()
     return {"code": 0}
 
 
 @app.get("/api/memory")
-def list_memory():
+def list_memory(request: Request):
     return [dict(r) for r in db.get().execute(
-        "SELECT * FROM memories ORDER BY id DESC LIMIT 100"
+        "SELECT * FROM memories WHERE kb_id=? ORDER BY id DESC LIMIT 100",
+        (KB(request),)
     )]
 
 
 @app.delete("/api/memory/{mid}")
-def del_memory(mid: int):
-    db.get().execute("DELETE FROM memories WHERE id=?", (mid,))
+def del_memory(request: Request, mid: int):
+    db.get().execute("DELETE FROM memories WHERE id=? AND kb_id=?",
+                     (mid, KB(request)))
     db.get().commit()
     return {"code": 0}
 
@@ -577,9 +582,8 @@ def list_sessions(request: Request):
 
 @app.post("/api/sessions")
 def create_session(request: Request, body: dict = None):
-    import random
     kb = KB(request)
-    sid = "s_" + "".join(random.choices("0123456789abcdef", k=8))
+    sid = "s_" + secrets.token_hex(8)
     title = ((body or {}).get("title") or "新对话").strip()[:30]
     db.get().execute(
         "INSERT INTO sessions(id,title,kb_id,created,updated) VALUES(?,?,?,?,?)",
@@ -705,6 +709,10 @@ def test_config(c: ConfigIn):
 
 # ---------------- 多知识库 ----------------
 
+KB_NAME_MAX_LENGTH = 64
+_KB_NAME_FORBIDDEN = '/\\:*?"<>|'
+
+
 @app.get("/api/kbs")
 def list_kbs():
     return [dict(r) for r in db.get().execute(
@@ -716,19 +724,29 @@ def create_kb(body: dict):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "名称不能为空")
-    if any(ch in name for ch in '/\\:*?"<>|'):
+    if len(name) > KB_NAME_MAX_LENGTH:
+        raise HTTPException(400, "名称不能超过 64 个字符")
+    if name in (".", ".."):
+        raise HTTPException(400, "名称不能为 . 或 ..")
+    if any(ch in name for ch in _KB_NAME_FORBIDDEN):
         raise HTTPException(400, "名称不能包含 \\ / : * ? 等符号")
-    import random
-    kid = "kb_" + "".join(random.choices("0123456789abcdef", k=6))
+    if db.get().execute("SELECT 1 FROM kbs WHERE name=?", (name,)).fetchone():
+        raise HTTPException(400, "已存在同名知识库")
+    try:
+        inbox_dir = kb_inbox_path(name, config.INBOX_DIR)
+    except ValueError:
+        raise HTTPException(400, "知识库名称无效")
+    kid = "kb_" + secrets.token_hex(4)
     while db.get().execute("SELECT 1 FROM kbs WHERE id=?", (kid,)).fetchone():
-        kid = "kb_" + "".join(random.choices("0123456789abcdef", k=6))
+        kid = "kb_" + secrets.token_hex(4)
+    # 先建收件夹再写库: 建夹失败不留孤儿库记录。
+    try:
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise HTTPException(500, "创建知识库文件夹失败")
     db.get().execute("INSERT INTO kbs(id,name,created) VALUES(?,?,?)",
                      (kid, name, db.now()))
     db.get().commit()
-    try:
-        (config.INBOX_DIR / name).mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
     return {"code": 0, "id": kid, "name": name}
 
 
@@ -747,11 +765,16 @@ def delete_kb(kb_id: str):
             pass
     db.get().execute("DELETE FROM flashcards WHERE kb_id=?", (kb_id,))
     db.get().execute("DELETE FROM chats WHERE kb_id=?", (kb_id,))
+    db.get().execute("DELETE FROM sessions WHERE kb_id=?", (kb_id,))
+    db.get().execute("DELETE FROM memories WHERE kb_id=?", (kb_id,))
     row = db.get().execute("SELECT name FROM kbs WHERE id=?", (kb_id,)).fetchone()
     db.get().execute("DELETE FROM kbs WHERE id=?", (kb_id,))
     db.get().commit()
     if row:
-        shutil.rmtree(config.INBOX_DIR / row["name"], ignore_errors=True)
+        # 只删严格位于收件夹内的目录; 旧库里的异常名称绝不能删到外面。
+        safe_rmtree(config.INBOX_DIR / row["name"], config.INBOX_DIR)
+    # 清理该库的原文目录(可能含此前删文档留下的孤儿文件)。
+    safe_rmtree(config.UPLOAD_DIR / kb_id, config.UPLOAD_DIR)
     return {"code": 0}
 
 
@@ -767,6 +790,7 @@ def _extract_web(url: str) -> tuple[str, str]:
                              "Chrome/120.0 Safari/537.36"}
     current = validate_public_url(url)
     for _ in range(6):
+        # 每跳都重新校验, 校验后立即请求(见 validate_public_url 的 TOCTOU 说明)。
         r = _hx.get(current, headers=headers, timeout=25, follow_redirects=False)
         if r.status_code not in (301, 302, 303, 307, 308):
             break
@@ -851,15 +875,15 @@ def scan_inbox():
     if pending_path().exists() or not _importing_lock.acquire(blocking=False):
         return
     try:
-        # 为每个库准备同名收件夹
+        # 为每个库准备同名收件夹; 旧库里的异常名称跳过, 绝不建到收件夹外面
         kbs = db.get().execute("SELECT id,name FROM kbs").fetchall()
         folders: list[tuple[str, str]] = []   # (path, kb_id)
         for r in kbs:
             try:
-                d = config.INBOX_DIR / r["name"]
+                d = kb_inbox_path(r["name"], config.INBOX_DIR)
                 d.mkdir(parents=True, exist_ok=True)
                 folders.append((str(d), r["id"]))
-            except OSError:
+            except (OSError, ValueError):
                 continue
         # 根目录散落文件 -> 默认库
         for f in sorted(config.INBOX_DIR.iterdir()):

@@ -309,7 +309,7 @@ def doc_pages(doc_id: int) -> list[dict]:
 @serialized
 def delete_doc(doc_id: int):
     row = db.get().execute(
-        "SELECT file_hash,kb_id FROM docs WHERE id=?", (doc_id,)
+        "SELECT file_hash,kb_id,file_path FROM docs WHERE id=?", (doc_id,)
     ).fetchone()
     if not row:
         raise ValueError("文档不存在")
@@ -320,6 +320,30 @@ def delete_doc(doc_id: int):
     _col.delete(where=where)
     db.get().execute("DELETE FROM docs WHERE id=?", (doc_id,))
     db.get().commit()
+    _delete_original(row["file_path"])
+
+
+def _delete_original(file_path):
+    """删除文档原文: 仅当文件位于 uploads/ 或收件夹内, 且无其他文档引用它。
+
+    路径不在这两个根目录内的不删(防止数据库里的异常路径删到外面去)。
+    """
+    if not file_path:
+        return
+    try:
+        target = Path(file_path).resolve()
+    except (OSError, RuntimeError):
+        return
+    roots = [config.UPLOAD_DIR.resolve(), config.INBOX_DIR.resolve()]
+    if target in roots or not any(target.is_relative_to(root) for root in roots):
+        return
+    if db.get().execute(
+            "SELECT 1 FROM docs WHERE file_path=? LIMIT 1", (file_path,)).fetchone():
+        return
+    try:
+        target.unlink()
+    except OSError:
+        pass
 
 
 def _ensure_bm25():

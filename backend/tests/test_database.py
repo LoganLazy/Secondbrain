@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -64,6 +65,73 @@ class DatabaseMigrationTests(unittest.TestCase):
                     ).fetchone()
                     self.assertEqual(row["filename"], "saved.md")
                     self.assertEqual(row["source_url"], "https://example.com/article")
+            finally:
+                if db._conn is not None:
+                    db._conn.close()
+                db._conn = old_conn
+
+    def test_legacy_memories_gain_kb_id_and_keep_default(self):
+        old_conn = db._conn
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            conn = sqlite3.connect(data_dir / "memory.db")
+            conn.executescript(
+                """
+                CREATE TABLE memories(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT, created REAL
+                );
+                INSERT INTO memories(content,created) VALUES('old fact', 100);
+                """
+            )
+            conn.commit()
+            conn.close()
+            db._conn = None
+            try:
+                with patch("app.db.config.DATA_DIR", data_dir):
+                    row = db.get().execute(
+                        "SELECT content,kb_id FROM memories WHERE id=1"
+                    ).fetchone()
+                    self.assertEqual(row["content"], "old fact")
+                    self.assertEqual(row["kb_id"], "default")
+            finally:
+                if db._conn is not None:
+                    db._conn.close()
+                db._conn = old_conn
+
+    def test_concurrent_reads_and_writes_do_not_raise_interface_error(self):
+        # 回归: 单个共享连接时, 并发请求会抛 sqlite3.InterfaceError。
+        old_conn = db._conn
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            db._conn = None
+            try:
+                with patch("app.db.config.DATA_DIR", data_dir):
+                    errors = []
+
+                    def work(n):
+                        try:
+                            conn = db.get()
+                            for i in range(20):
+                                conn.execute(
+                                    "INSERT INTO memories(content,kb_id,created)"
+                                    " VALUES(?,?,?)", (f"fact-{n}-{i}", "default", 1.0))
+                                conn.commit()
+                                conn.execute(
+                                    "SELECT COUNT(*) FROM memories").fetchone()
+                        except Exception as exc:  # noqa: BLE001 - 收集后统一断言
+                            errors.append(exc)
+
+                    threads = [threading.Thread(target=work, args=(n,))
+                               for n in range(16)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join()
+                    self.assertEqual(errors, [])
+                    count = db.get().execute(
+                        "SELECT COUNT(*) c FROM memories").fetchone()["c"]
+                    self.assertEqual(count, 16 * 20)
             finally:
                 if db._conn is not None:
                     db._conn.close()
